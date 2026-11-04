@@ -95,7 +95,8 @@ object GatewayUrlPolicy {
             return v4[0] == 10 || v4[0] == 127 ||
                 (v4[0] == 169 && v4[1] == 254) ||
                 (v4[0] == 172 && v4[1] in 16..31) ||
-                (v4[0] == 192 && v4[1] == 168)
+                (v4[0] == 192 && v4[1] == 168) ||
+                (v4[0] == 100 && v4[1] in 64..127) // Tailscale/CGNAT (local patch)
         }
         // Validate a literal IPv6 address; a public hostname beginning with 'fc' is not a ULA.
         if (':' in host && host.matches(Regex("[0-9a-f:]+"))) {
