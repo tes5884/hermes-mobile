@@ -2740,6 +2740,21 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    /** Pin / unpin from the Agents list. Saved on the gateway (ui_meta), so it syncs across devices. */
+    fun setBotPinned(profile: HermesProfile, pinned: Boolean) {
+        val repo = repository ?: return
+        viewModelScope.launch {
+            runCatching { repo.setBotPinned(profile.name, pinned) }
+                .onSuccess { result ->
+                    if (result.uiMetaConflict || result.applied.any { !it.value }) {
+                        uiState = uiState.copy(error = string(R.string.i18n_vm_bot_conflict))
+                    }
+                    refreshProfiles(then = ::refreshBotRoster)
+                }
+                .onFailure { uiState = uiState.copy(error = it.message) }
+        }
+    }
+
     fun closeBotEditor() {
         botEditorGeneration += 1
         uiState = uiState.copy(

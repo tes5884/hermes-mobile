@@ -48,8 +48,10 @@ fun BotEditorDialog(
     config: BotProfileConfig,
     saving: Boolean,
     onDismiss: () -> Unit,
-    onSave: (BotProfileConfig) -> Unit
+    onSave: (BotProfileConfig) -> Unit,
+    sectionOptions: List<String> = emptyList()
 ) {
+    var section by remember(config.profile.name, config.uiMetaRevision) { mutableStateOf(config.section) }
     var tab by remember(config.profile.name, config.uiMetaRevision) { mutableStateOf(BotEditorTab.GENERAL) }
     var title by remember(config.profile.name, config.uiMetaRevision) { mutableStateOf(config.title) }
     var description by remember(config.profile.name, config.uiMetaRevision) { mutableStateOf(config.description) }
@@ -75,6 +77,7 @@ fun BotEditorDialog(
         color = color,
         hidden = hidden,
         pinned = pinned,
+        section = section,
         skills = skills,
         toolsets = toolsets,
         mcpServers = mcp,
@@ -137,6 +140,9 @@ fun BotEditorDialog(
                             onHidden = { hidden = it },
                             pinned = pinned,
                             onPinned = { pinned = it },
+                            section = section,
+                            onSection = { section = it },
+                            sectionOptions = sectionOptions,
                             avatarDataUrl = avatarDataUrl,
                             onAvatarDataUrl = { avatarDataUrl = it }
                         )
@@ -192,6 +198,9 @@ private fun GeneralBotEditor(
     onHidden: (Boolean) -> Unit,
     pinned: Boolean,
     onPinned: (Boolean) -> Unit,
+    section: String,
+    onSection: (String) -> Unit,
+    sectionOptions: List<String>,
     avatarDataUrl: String?,
     onAvatarDataUrl: (String?) -> Unit
 ) {
@@ -264,6 +273,12 @@ private fun GeneralBotEditor(
         HermesTextField(shape, onShape, stringResource(R.string.i18n_avatar_shape), placeholder = "blobatar")
         HermesTextField(color, onColor, stringResource(R.string.i18n_avatar_color), placeholder = stringResource(R.string.i18n_optional))
 
+        HermesTextField(section, onSection, stringResource(R.string.bots_section), placeholder = stringResource(R.string.bots_section_other))
+        if (sectionOptions.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                sectionOptions.forEach { AssistChip(onClick = { onSection(it) }, label = { Text(it, maxLines = 1) }) }
+            }
+        }
         SettingSwitch(stringResource(R.string.i18n_bot_pinned), stringResource(R.string.i18n_bot_pinned_hint), pinned, onPinned)
         SettingSwitch(stringResource(R.string.i18n_bot_hidden), stringResource(R.string.i18n_bot_hidden_hint), hidden, onHidden)
     }

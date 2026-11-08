@@ -554,6 +554,7 @@ class HermesRepository(
             color = meta.optString("color"),
             hidden = meta.optBoolean("hidden", false),
             pinned = meta.optBoolean("pinned", false),
+            section = meta.optString("section").trim(),
             skills = (described.optJSONArray("skills") ?: JSONArray()).objects().map(BotCapability::fromJson),
             toolsets = (described.optJSONArray("toolsets") ?: JSONArray()).objects().map(BotCapability::fromJson),
             mcpServers = configuredMcp + catalogMcp,
@@ -574,7 +575,7 @@ class HermesRepository(
 
         val avatarChanged = original.avatarDataUrl != updated.avatarDataUrl
         val lookChanged = original.title != updated.title || original.shape != updated.shape ||
-            original.color != updated.color || original.hidden != updated.hidden || original.pinned != updated.pinned || avatarChanged
+            original.color != updated.color || original.hidden != updated.hidden || original.pinned != updated.pinned || original.section.trim() != updated.section.trim() || avatarChanged
         if (lookChanged) {
             val previousMeta = original.profile.uiMeta?.optJSONObject(BOT_META_KEY)
             val nextMeta = if (previousMeta != null) JSONObject(previousMeta.toString()) else JSONObject()
@@ -583,6 +584,7 @@ class HermesRepository(
             if (updated.color.isBlank()) nextMeta.remove("color") else nextMeta.put("color", updated.color)
             nextMeta.put("hidden", updated.hidden)
             nextMeta.put("pinned", updated.pinned)
+            if (updated.section.isBlank()) nextMeta.remove("section") else nextMeta.put("section", updated.section.trim())
             nextMeta.put("custom", true)
             if (avatarChanged) nextMeta.put("imageKind", if (updated.avatarDataUrl.isNullOrBlank()) "shape" else "photo")
             else if (!nextMeta.has("imageKind")) nextMeta.put("imageKind", "shape")
@@ -641,6 +643,18 @@ class HermesRepository(
             setBotAvatar(original.profile.name, updated.avatarDataUrl)
         }
         return result
+    }
+
+    /** Flip ui_meta["hermes-bots"].pinned for one bot straight from the Agents list (same CAS path as the editor). */
+    suspend fun setBotPinned(profileName: String, pinned: Boolean): BotSaveResult {
+        val fresh = rpcProfiles().firstOrNull { it.name == profileName } ?: error("Profile $profileName not found")
+        val previous = fresh.uiMeta?.optJSONObject(BOT_META_KEY)
+        val next = if (previous != null) JSONObject(previous.toString()) else JSONObject()
+        next.put("pinned", pinned)
+        val payload = JSONObject().put("name", profileName).put("profile", profileName)
+            .put("ui_meta", JSONObject().put(BOT_META_KEY, next))
+            .put("ui_meta_expected_revisions", JSONObject().put(BOT_META_KEY, fresh.uiMetaRevisions[BOT_META_KEY] ?: 0))
+        return parseBotSaveResult(gateway.requestObject("profiles.configure", payload, timeoutMs = 60_000))
     }
 
     suspend fun confirmBotModelSwitch(profile: String, provider: String, model: String): BotSaveResult {

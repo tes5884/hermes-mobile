@@ -87,4 +87,12 @@
     <string name="routines_state_disabled">Off</string>
     <string name="routines_state_error">Failed</string>
     <string name="routines_delete_title">Delete this job?</string>
+    <string name="bots_section">Section</string>
+    <string name="bots_section_other">Other</string>
+    <string name="bots_view_list">List view</string>
+    <string name="bots_pin">Pin to top</string>
+    <string name="bots_unpin">Unpin</string>
+    <string name="bots_view_grid">Grid view</string>
+    <string name="bots_section_toggle">Show or hide %1$s</string>
+    <string name="bots_section_pinned">Pinned</string>
 </resources>

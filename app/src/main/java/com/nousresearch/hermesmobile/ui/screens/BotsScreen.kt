@@ -7,13 +7,19 @@ import androidx.compose.ui.res.stringResource
 
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +57,7 @@ fun BotsScreen(
     onSaveEditor: (BotProfileConfig) -> Unit,
     onCloseEditor: () -> Unit,
     onDelete: (HermesProfile) -> Unit,
+    onSetPinned: (HermesProfile, Boolean) -> Unit,
     onRefreshGroups: () -> Unit,
     onCreateGroup: (String, Set<String>) -> Unit,
     onOpenGroup: (GroupRoom) -> Unit,
@@ -73,6 +80,13 @@ fun BotsScreen(
     val bots = remember(allBots, showHidden, search) {
         allBots.filter { (showHidden || !it.profile.botHidden) && (it.label.contains(search, true) || it.profile.name.contains(search, true)) }
             .sortedWith(botRosterOrder)
+    }
+    val prefs = androidx.compose.ui.platform.LocalContext.current.getSharedPreferences("hermes_mobile_ui", android.content.Context.MODE_PRIVATE)
+    var gridView by remember { mutableStateOf(prefs.getBoolean("bots_grid", false)) }
+    var collapsedSections by rememberSaveable { mutableStateOf(setOf<String>()) }
+    // Search ignores sections: one flat, alphabetical result list (headerless, marked by the empty name).
+    val sections = remember(bots, search) {
+        if (search.isNotBlank()) listOf("" to bots.sortedBy { it.label.lowercase() }) else botSections(bots)
     }
 
     if (activeGroup != null) {
@@ -106,7 +120,20 @@ fun BotsScreen(
             Tab(selected = page == 0, onClick = { page = 0 }, text = { Text(stringResource(R.string.i18n_bots_tab, allBots.count { !it.profile.botHidden })) })
             Tab(selected = page == 1, onClick = { page = 1; onRefreshGroups() }, text = { Text(stringResource(R.string.i18n_groups_tab, groupRooms.size)) })
         }
-        if (page == 0) com.nousresearch.hermesmobile.ui.components.HermesSearchField(search, { search = it }, stringResource(R.string.a14_search), Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+        if (page == 0) Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            com.nousresearch.hermesmobile.ui.components.HermesSearchField(search, { search = it }, stringResource(R.string.a14_search), Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            SingleChoiceSegmentedButtonRow {
+                SegmentedButton(
+                    selected = !gridView, onClick = { gridView = false; prefs.edit().putBoolean("bots_grid", false).apply() },
+                    shape = SegmentedButtonDefaults.itemShape(0, 2), icon = {}
+                ) { Icon(Icons.Default.ViewList, stringResource(R.string.bots_view_list), Modifier.size(18.dp)) }
+                SegmentedButton(
+                    selected = gridView, onClick = { gridView = true; prefs.edit().putBoolean("bots_grid", true).apply() },
+                    shape = SegmentedButtonDefaults.itemShape(1, 2), icon = {}
+                ) { Icon(Icons.Default.GridView, stringResource(R.string.bots_view_grid), Modifier.size(18.dp)) }
+            }
+        }
         if (botRosterLoading && page == 0) LinearProgressIndicator(Modifier.fillMaxWidth())
         if (page == 1) {
             GroupsPanel(
@@ -119,27 +146,55 @@ fun BotsScreen(
                 Button(onClick = { create = true }) { Text(stringResource(R.string.ui_b23572a604)) }
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(bots, key = { it.routeKey }) { routed ->
-                    val profile = routed.profile
-                    if (routed.activeConnection) {
-                        LaunchedEffect(profile.name, profile.hasAvatar) { onEnsureAvatar(profile) }
+            val rowActions: (RoutedBot) -> BotActions = { routed ->
+                val profile = routed.profile
+                BotActions(
+                    onSwitchConnection = { onSwitchConnection(routed.connectionId) },
+                    onOpen = { onOpen(profile) },
+                    onNewChat = { onNewChat(profile) },
+                    onEdit = { onEdit(profile) },
+                    onDelete = { deleteCandidate = profile },
+                    onTogglePin = { onSetPinned(profile, !profile.botPinned) }
+                )
+            }
+            LazyVerticalGrid(
+                columns = if (gridView) GridCells.Adaptive(112.dp) else GridCells.Fixed(1),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = if (gridView) 12.dp else 0.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(if (gridView) 8.dp else 0.dp)
+            ) {
+                sections.forEach { (name, members) ->
+                    val collapsed = name in collapsedSections
+                    if (name.isNotEmpty()) {
+                        item(key = "h:$name", span = { GridItemSpan(maxLineSpan) }) {
+                            SectionHeader(sectionLabel(name), members.size, collapsed) {
+                                collapsedSections = if (collapsed) collapsedSections - name else collapsedSections + name
+                            }
+                        }
                     }
-                    BotRow(
-                        routed = routed,
-                        avatarDataUrl = avatarAssets[profile.name].takeIf { routed.activeConnection },
-                        dot = if (routed.activeConnection) com.nousresearch.hermesmobile.data.LiveSessions.dotFor(sessionDots, profile.canonicalSession)
-                            else com.nousresearch.hermesmobile.data.SessionDot.NONE,
-                        onSwitchConnection = { onSwitchConnection(routed.connectionId) },
-                        onOpen = { onOpen(profile) },
-                        onNewChat = { onNewChat(profile) },
-                        onEdit = { onEdit(profile) },
-                        onDelete = { deleteCandidate = profile }
-                    )
-                    HorizontalDivider(
-                        modifier = Modifier.padding(start = 68.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = .22f)
-                    )
+                    if (!collapsed) items(members, key = { it.routeKey }) { routed ->
+                        val profile = routed.profile
+                        if (routed.activeConnection) {
+                            LaunchedEffect(profile.name, profile.hasAvatar) { onEnsureAvatar(profile) }
+                        }
+                        val dot = if (routed.activeConnection) com.nousresearch.hermesmobile.data.LiveSessions.dotFor(sessionDots, profile.canonicalSession)
+                            else com.nousresearch.hermesmobile.data.SessionDot.NONE
+                        val avatar = avatarAssets[profile.name].takeIf { routed.activeConnection }
+                        val a = rowActions(routed)
+                        if (gridView) {
+                            BotTile(routed, avatar, dot, a)
+                        } else {
+                            Column {
+                                BotRow(
+                                    routed = routed, avatarDataUrl = avatar, dot = dot,
+                                    onSwitchConnection = a.onSwitchConnection, onOpen = a.onOpen,
+                                    onNewChat = a.onNewChat, onEdit = a.onEdit, onDelete = a.onDelete, onTogglePin = a.onTogglePin
+                                )
+                                HorizontalDivider(Modifier.padding(start = 68.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = .22f))
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -161,7 +216,8 @@ fun BotsScreen(
             config = it,
             saving = editorSaving,
             onDismiss = onCloseEditor,
-            onSave = onSaveEditor
+            onSave = onSaveEditor,
+            sectionOptions = remember(allBots) { allBots.map { botSection(it) }.filter { it.isNotBlank() }.distinct().sortedBy { it.lowercase() } }
         )
     }
 
@@ -212,7 +268,8 @@ private fun BotRow(
     onOpen: () -> Unit,
     onNewChat: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onTogglePin: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
     val profile = routed.profile
@@ -295,6 +352,11 @@ private fun BotRow(
                         onClick = { menu = false; onNewChat() }
                     )
                     DropdownMenuItem(
+                        text = { Text(stringResource(if (profile.botPinned) R.string.bots_unpin else R.string.bots_pin)) },
+                        leadingIcon = { Icon(Icons.Default.PushPin, null) },
+                        onClick = { menu = false; onTogglePin() }
+                    )
+                    DropdownMenuItem(
                         text = { Text(stringResource(R.string.ui_c0cd1fd055)) },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { menu = false; onEdit() }
@@ -360,4 +422,97 @@ private fun CreateBotDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.ui_19766ed6cc)) } }
     )
+}
+
+private class BotActions(
+    val onSwitchConnection: () -> Unit,
+    val onOpen: () -> Unit,
+    val onNewChat: () -> Unit,
+    val onEdit: () -> Unit,
+    val onDelete: () -> Unit,
+    val onTogglePin: () -> Unit
+)
+
+internal fun botSection(bot: RoutedBot): String =
+    bot.profile.botSection
+
+/** Sections alphabetical, unassigned bots under "Other" last; bots alphabetical inside each. */
+internal fun botSections(bots: List<RoutedBot>): List<Pair<String, List<RoutedBot>>> {
+    // Pinned bots live only in a "Pinned" section above every department (not repeated below), A-Z.
+    val (pinned, rest) = bots.partition { it.profile.botPinned }
+    val departments = rest.groupBy { botSection(it).ifBlank { OTHER_SECTION } }
+        .map { (name, list) -> name to list.sortedBy { it.label.lowercase() } }
+        .sortedWith(compareBy({ it.first == OTHER_SECTION }, { it.first.lowercase() }))
+    return if (pinned.isEmpty()) departments else listOf(PINNED_SECTION to pinned.sortedBy { it.label.lowercase() }) + departments
+}
+
+internal const val PINNED_SECTION = "Pinned"
+internal const val OTHER_SECTION = "Other"
+
+/** Display name of a section key: the two built-in groups are translated, custom sections are shown as typed. */
+@Composable
+private fun sectionLabel(key: String): String = when (key) {
+    PINNED_SECTION -> stringResource(R.string.bots_section_pinned)
+    OTHER_SECTION -> stringResource(R.string.bots_section_other)
+    else -> key
+}
+
+@Composable
+private fun SectionHeader(name: String, count: Int, collapsed: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClickLabel = stringResource(R.string.bots_section_toggle, name), onClick = onToggle)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(name.uppercase(), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, letterSpacing = androidx.compose.ui.unit.TextUnit(1.2f, androidx.compose.ui.unit.TextUnitType.Sp))
+        Spacer(Modifier.width(8.dp))
+        Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
+            Text("$count", Modifier.padding(horizontal = 8.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+        Spacer(Modifier.weight(1f))
+        Icon(if (collapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousresearch.hermesmobile.data.SessionDot, a: BotActions) {
+    var menu by remember { mutableStateOf(false) }
+    val profile = routed.profile
+    val role = profile.description.substringAfter('|', profile.description).trim().ifBlank { profile.name }
+    Surface(
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.hermes.line),
+        modifier = Modifier.fillMaxWidth().runningArc(dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING)
+            .combinedClickable(onClick = if (routed.activeConnection) a.onOpen else a.onSwitchConnection, onLongClick = { menu = true })
+    ) {
+        Column(Modifier.padding(horizontal = 6.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box {
+                ProfileAvatar(profile, size = 68, avatarDataUrl = avatarDataUrl)
+                if (dot != com.nousresearch.hermesmobile.data.SessionDot.NONE) {
+                    Box(Modifier.align(Alignment.BottomEnd)) { com.nousresearch.hermesmobile.ui.components.SessionStatusDot(dot) }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                Text(profile.label.substringBefore('|').trim(), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (profile.botPinned) {
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Default.PushPin, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Text(role, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                if (!routed.activeConnection) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.i18n_bots_switch_to, routed.connectionLabel)) }, leadingIcon = { Icon(Icons.Default.Dns, null) }, onClick = { menu = false; a.onSwitchConnection() })
+                } else {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.ui_885b06da76)) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Chat, null) }, onClick = { menu = false; a.onOpen() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.ui_b13f96dc48)) }, leadingIcon = { Icon(Icons.Default.AddComment, null) }, onClick = { menu = false; a.onNewChat() })
+                    DropdownMenuItem(text = { Text(stringResource(if (profile.botPinned) R.string.bots_unpin else R.string.bots_pin)) }, leadingIcon = { Icon(Icons.Default.PushPin, null) }, onClick = { menu = false; a.onTogglePin() })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.ui_c0cd1fd055)) }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = { menu = false; a.onEdit() })
+                    if (!profile.isDefault) DropdownMenuItem(text = { Text(stringResource(R.string.ui_f53f5a6eb1)) }, leadingIcon = { Icon(Icons.Default.DeleteOutline, null) }, onClick = { menu = false; a.onDelete() })
+                }
+            }
+        }
+    }
 }

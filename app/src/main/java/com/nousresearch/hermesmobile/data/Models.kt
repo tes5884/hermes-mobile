@@ -188,6 +188,8 @@ data class HermesProfile(
     val isBot: Boolean get() = botMeta != null
     val botHidden: Boolean get() = botMeta?.optBoolean("hidden", false) ?: false
     val botPinned: Boolean get() = botMeta?.optBoolean("pinned", false) ?: false
+    /** Department the bot is filed under (ui_meta["hermes-bots"].section); blank = unassigned ("Other"). */
+    val botSection: String get() = botMeta?.optString("section").orEmpty().trim()
 
     companion object {
         fun fromJson(o: JSONObject): HermesProfile {
@@ -279,6 +281,7 @@ data class BotProfileConfig(
     val color: String = "",
     val hidden: Boolean = false,
     val pinned: Boolean = false,
+    val section: String = "",
     val skills: List<BotCapability> = emptyList(),
     val toolsets: List<BotCapability> = emptyList(),
     val mcpServers: List<BotCapability> = emptyList(),

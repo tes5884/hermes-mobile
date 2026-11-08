@@ -211,6 +211,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onNewChat = vm::newBotSideChat,
                         onEdit = vm::editBot,
                         onSaveEditor = vm::saveBotEditor,
+                        onSetPinned = vm::setBotPinned,
                         onCloseEditor = vm::closeBotEditor,
                         onDelete = vm::deleteBot,
                         onRefreshGroups = vm::refreshGroups,

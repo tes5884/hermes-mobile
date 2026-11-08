@@ -9,6 +9,11 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Added
+
+- **Agents grid and sections.** The Agents list has a grid view next to the list view, and bots can be filed under a section (a free-text "Section" field in the bot editor, saved in the bot's `ui_meta` with the rest of its look). Sections are collapsible, and bots without one are under "Other".
+- **Pin agents from the Agents list.** The menu of a bot has Pin to top / Unpin. Pinned bots show first, in a Pinned section, with a pin mark, and the choice is saved in the bot's `ui_meta`, so it syncs across devices.
+
 ## [0.3.0-beta.15] - 2026-10-31
 
 ### Added
