@@ -702,6 +702,37 @@ private fun ClarifyOptionRow(option: ClarifyOption, selected: Boolean, multi: Bo
     }
 }
 
+/** Command text shown in an approval prompt: [COMMAND_PREVIEW_LINES] lines, "Show all" for more; the expanded block scrolls on its own. */
+const val COMMAND_PREVIEW_LINES = 8
+
+fun commandNeedsCollapse(command: String, maxLines: Int = COMMAND_PREVIEW_LINES): Boolean =
+    command.lineSequence().count() > maxLines
+
+@Composable
+fun CollapsibleCommand(command: String, modifier: Modifier = Modifier) {
+    var expanded by remember(command) { mutableStateOf(false) }
+    val collapsible = remember(command) { commandNeedsCollapse(command) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Surface(
+            color = MaterialTheme.hermes.codeBlock,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, MaterialTheme.hermes.codeBlockBorder)
+        ) {
+            Text(
+                command,
+                Modifier.then(if (expanded) Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()) else Modifier).padding(12.dp),
+                fontFamily = com.nousresearch.hermesmobile.ui.theme.HermesMono,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = if (expanded || !collapsible) Int.MAX_VALUE else COMMAND_PREVIEW_LINES,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (collapsible) TextButton(onClick = { expanded = !expanded }) {
+            Text(stringResource(if (expanded) R.string.approval_show_less else R.string.approval_show_all))
+        }
+    }
+}
+
 @Composable
 fun InteractionDialog(
     interaction: ServerInteraction,
@@ -744,18 +775,7 @@ fun InteractionDialog(
                     Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         p.optString("description").takeIf { it.isNotBlank() }?.let { Text(it) }
                         p.optString("command").takeIf { it.isNotBlank() }?.let {
-                            Surface(
-                                color = MaterialTheme.hermes.codeBlock,
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, MaterialTheme.hermes.codeBlockBorder)
-                            ) {
-                                Text(
-                                    it,
-                                    Modifier.padding(12.dp),
-                                    fontFamily = com.nousresearch.hermesmobile.ui.theme.HermesMono,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
+                            CollapsibleCommand(it)
                         }
                     }
                 },

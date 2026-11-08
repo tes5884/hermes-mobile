@@ -675,8 +675,8 @@ private fun PendingRoomActionCard(
             when (action.kind) {
                 "approval" -> {
                     Text(stringResource(R.string.i18n_grp_approval, member?.handle ?: action.memberId), style = MaterialTheme.typography.titleSmall)
-                    if (action.command.isNotBlank()) Text(action.command, style = MaterialTheme.typography.bodySmall, fontFamily = com.nousresearch.hermesmobile.ui.theme.HermesMono)
-                    if (action.description.isNotBlank()) Text(action.description, style = MaterialTheme.typography.bodySmall)
+                    if (action.command.isNotBlank()) com.nousresearch.hermesmobile.ui.components.CollapsibleCommand(action.command)
+                    if (action.description.isNotBlank()) Text(action.description, style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(enabled = !busy, onClick = { onApprove(action, "once") }) { Text(stringResource(R.string.ui_168511d24d)) }
                         OutlinedButton(enabled = !busy, onClick = { onApprove(action, "deny") }) { Text(stringResource(R.string.ui_05a2d7332e)) }

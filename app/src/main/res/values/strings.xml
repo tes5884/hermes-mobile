@@ -110,4 +110,6 @@
     <string name="bots_unpin">Unpin</string>
     <string name="bots_view_grid">Grid view</string>
     <string name="bots_section_toggle">Show or hide %1$s</string>
+    <string name="approval_show_all">Show all</string>
+    <string name="approval_show_less">Show less</string>
 </resources>

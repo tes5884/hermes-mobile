@@ -92,4 +92,6 @@
     <string name="routines_state_disabled">Desactivado</string>
     <string name="routines_state_error">Falló</string>
     <string name="routines_delete_title">¿Eliminar este trabajo?</string>
+    <string name="approval_show_all">Mostrar todo</string>
+    <string name="approval_show_less">Mostrar menos</string>
 </resources>
