@@ -261,7 +261,7 @@ private fun GroupRoomView(
     // latest message, stays pinned there as events arrive, and never moves a reader who scrolled up.
     val listState = remember(active.room.roomId) { androidx.compose.foundation.lazy.LazyListState() }
     val visibleEvents = remember(active.events) { active.events.filter { shouldRenderRoomEvent(it) } }
-    val reversedEvents = remember(visibleEvents) { visibleEvents.asReversed() }
+    val reversedRows = remember(visibleEvents) { RoomRows.build(visibleEvents).asReversed() }
     val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
     val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
 
@@ -336,13 +336,19 @@ private fun GroupRoomView(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(reversedEvents, key = { it.seq }) { event ->
-                    RoomEventRow(
-                        event = event,
-                        member = membersById[event.memberId],
-                        onReplyThread = { event.threadId.takeIf(String::isNotBlank)?.let(onReplyThread) },
-                        onReplyTo = { handle -> input = appendMention(input, handle) }
-                    )
+                items(reversedRows, key = { it.key }) { row ->
+                    when (row) {
+                        is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
+                        is RoomRow.Event -> {
+                            val event = row.event
+                            RoomEventRow(
+                                event = event,
+                                member = membersById[event.memberId],
+                                onReplyThread = { event.threadId.takeIf(String::isNotBlank)?.let(onReplyThread) },
+                                onReplyTo = { handle -> input = appendMention(input, handle) }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -425,12 +431,18 @@ private fun RoomEventRow(
                 modifier = Modifier.fillMaxWidth(if (user) .86f else .94f)
             ) {
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+                    val timeText = RoomRows.millis(event)?.let { android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date(it)) }
                     if (!user) {
-                        Text(
-                            member?.let { "@${it.handle} · ${it.label}" } ?: event.actor.displayName.ifBlank { event.actor.id },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                member?.let { "@${it.handle} · ${it.label}" } ?: event.actor.displayName.ifBlank { event.actor.id },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (timeText != null) Text(timeText, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         Spacer(Modifier.height(3.dp))
                     }
                     if (event.text.isNotBlank()) {
@@ -441,6 +453,7 @@ private fun RoomEventRow(
                         }
                     }
                     event.attachments.forEach { RoomAttachment(event.eventId, it) }
+                    if (user && timeText != null) Text(timeText, Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.End, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (event.threadId.isNotBlank()) {
                             TextButton(onClick = onReplyThread, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(stringResource(R.string.ui_a236732715), style = MaterialTheme.typography.labelSmall) }
