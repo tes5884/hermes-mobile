@@ -68,7 +68,8 @@ fun GroupsPanel(
     onStop: () -> Unit,
     onRetry: (GroupPendingAction) -> Unit,
     onApprove: (GroupPendingAction, String) -> Unit,
-    onDisband: () -> Unit
+    onDisband: () -> Unit,
+    unread: Map<String, Int> = emptyMap()
 ) {
     if (active != null) {
         GroupRoomView(
@@ -129,7 +130,7 @@ fun GroupsPanel(
             ) { Button(onClick = { create = true }, enabled = capabilities?.driver == true && routedBots.size >= 2) { Text(stringResource(R.string.ui_7888b00075)) } }
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 items(rooms, key = { it.roomId }) { room ->
-                    GroupRoomRow(room, onOpen = { onOpen(room) })
+                    GroupRoomRow(room, unread[room.roomId] ?: 0, onOpen = { onOpen(room) })
                     HorizontalDivider(
                         Modifier.padding(start = 16.dp),
                         color = MaterialTheme.colorScheme.outline.copy(alpha = .2f)
@@ -154,23 +155,24 @@ fun GroupsPanel(
 }
 
 @Composable
-private fun GroupRoomRow(room: GroupRoom, onOpen: () -> Unit) {
+private fun GroupRoomRow(room: GroupRoom, unread: Int, onOpen: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(Icons.Default.Groups, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(room.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(room.name, style = MaterialTheme.typography.bodyLarge, fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Medium)
             Text(
                 room.members.joinToString(" · ") { if (it.targetKind == "peer") "☁ @${it.handle}" else "@${it.handle}" },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (unread > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
+        if (unread > 0) { UnreadPill(unread); Spacer(Modifier.width(8.dp)) }
         Text("${room.members.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         IconButton(onClick = onOpen) { Icon(Icons.Default.ChevronRight, stringResource(R.string.ui_ed077f3d81)) }
     }
@@ -667,5 +669,22 @@ private fun NewMessagesRow() {
         Text(stringResource(R.string.group_new_messages), Modifier.padding(horizontal = 10.dp), style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
         HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary.copy(alpha = .6f))
+    }
+}
+
+/** Accent pill with a count; a null count is the 8dp dot (bots, whose server flag has no number). Accent = unread, never the green busy dot. */
+@Composable
+internal fun UnreadPill(count: Int?, modifier: Modifier = Modifier) {
+    val accent = MaterialTheme.colorScheme.primary
+    if (count == null) {
+        Box(modifier.size(8.dp).background(accent, androidx.compose.foundation.shape.CircleShape))
+    } else {
+        Box(
+            modifier.defaultMinSize(minWidth = 20.dp, minHeight = 20.dp).background(accent, androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(if (count > 99) "99+" else "$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
+        }
     }
 }

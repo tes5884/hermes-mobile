@@ -14,6 +14,7 @@ server plugin it needs for notifications.
 - **Attach files and photos in group chats.** The room composer has a paperclip like the 1:1 composer (up to 8 files, 25 MB in total), and attachments in a room show as inline images or tappable file cards, using the gateway's `groups.attachment.upload` and `groups.attachment.download`.
 - **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 - **Group chats open where you left off.** The phone remembers the newest message you saw in each room (the gateway has no read marker for rooms). A "New messages" divider marks the first message from a bot after that point, and a "↓ N new" button jumps to the newest.
+- **Unread markers on Agents and Groups.** Agents with an unread chat (the server's flag, shared with Desktop) and rooms with bot messages after your last-seen point show a bold name and an accent pill or dot, also on the tab labels. Your own messages and status lines never count; order is unchanged.
 
 ### Fixed
 

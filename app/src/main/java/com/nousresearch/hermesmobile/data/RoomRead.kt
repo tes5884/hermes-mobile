@@ -18,6 +18,12 @@ object RoomRead {
     /** The user's own newest message: sending counts as having read everything up to it. */
     fun newestOwnSeq(events: List<GroupEvent>): Long = events.filter { it.kind == "message.user" }.maxOfOrNull { it.seq } ?: 0L
 
+    /**
+     * Rooms-list badge: bot messages after the phone's last-seen marker. The user's own messages and status lines never
+     * count, and a room never opened on this phone (no marker) shows nothing rather than its whole history.
+     */
+    fun listUnread(events: List<GroupEvent>, saved: Long?): Int = if (saved == null) 0 else unreadCount(events, saved)
+
     private fun key(roomId: String) = "seen:$roomId"
     fun load(prefs: SharedPreferences, roomId: String): Long? =
         if (prefs.contains(key(roomId))) prefs.getLong(key(roomId), 0L) else null
