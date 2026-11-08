@@ -87,4 +87,6 @@
     <string name="routines_state_disabled">Off</string>
     <string name="routines_state_error">Failed</string>
     <string name="routines_delete_title">Delete this job?</string>
+    <string name="group_new_messages">New messages</string>
+    <string name="group_new_chip">↓ %1$d new</string>
 </resources>

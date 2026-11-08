@@ -4,6 +4,7 @@ package com.nousresearch.hermesmobile.data
 sealed class RoomRow(val key: String) {
     class Day(val millis: Long, epochDay: Long) : RoomRow("day:$epochDay")
     class Event(val event: GroupEvent) : RoomRow("e:${event.seq}")
+    object NewMessages : RoomRow("new")
 }
 
 object RoomRows {
@@ -17,7 +18,7 @@ object RoomRows {
      * Returned oldest-first; reverse it for a reverseLayout list (the divider then
      * sits above the day's first message).
      */
-    fun build(chronological: List<GroupEvent>, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): List<RoomRow> {
+    fun build(chronological: List<GroupEvent>, zone: java.time.ZoneId = java.time.ZoneId.systemDefault(), newMessagesBeforeSeq: Long? = null): List<RoomRow> {
         val out = ArrayList<RoomRow>(chronological.size + 4)
         var lastDay = Long.MIN_VALUE
         for (e in chronological) {
@@ -26,6 +27,7 @@ object RoomRows {
                 val day = java.time.Instant.ofEpochMilli(ms).atZone(zone).toLocalDate().toEpochDay()
                 if (day != lastDay) { out.add(RoomRow.Day(ms, day)); lastDay = day }
             }
+            if (newMessagesBeforeSeq != null && e.seq == newMessagesBeforeSeq) out.add(RoomRow.NewMessages)
             out.add(RoomRow.Event(e))
         }
         return out

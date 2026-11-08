@@ -87,4 +87,6 @@
     <string name="routines_state_disabled">Desactivado</string>
     <string name="routines_state_error">Falló</string>
     <string name="routines_delete_title">¿Eliminar este trabajo?</string>
+    <string name="group_new_messages">Mensajes nuevos</string>
+    <string name="group_new_chip">↓ %1$d nuevos</string>
 </resources>
