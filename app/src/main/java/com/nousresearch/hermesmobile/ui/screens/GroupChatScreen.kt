@@ -8,6 +8,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import kotlinx.coroutines.launch
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
@@ -37,6 +39,7 @@ import com.nousresearch.hermesmobile.ui.theme.hermes
 class GroupAttachmentActions(
     val onAttach: (List<android.net.Uri>) -> Unit = {},
     val onRemove: (String) -> Unit = {},
+    val onSendVoice: (java.io.File, Long) -> Unit = { f, _ -> f.delete() },
     val fetch: suspend (String, GroupAttachment) -> GroupAttachmentFile = { _, _ -> error("unavailable") },
     val onOpen: (String, GroupAttachment) -> Unit = { _, _ -> }
 )
@@ -370,6 +373,40 @@ private fun GroupRoomView(
             androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
         ) { uris -> if (uris.isNotEmpty()) attachActions.onAttach(uris) }
         AttachmentStrip(active.composerAttachments, attachActions.onRemove)
+        val context = LocalContext.current
+        var recorderLimit by remember { mutableStateOf(false) }
+        val recorder = remember(active.room.roomId) { com.nousresearch.hermesmobile.features.VoiceNoteRecorder(context) { recorderLimit = true } }
+        var recordingMs by remember { mutableStateOf<Long?>(null) }
+        var micError by remember { mutableStateOf<String?>(null) }
+        fun startRecording() {
+            micError = null
+            runCatching { recorder.start(); recordingMs = 0L }.onFailure { micError = it.message ?: "Could not start recording" }
+        }
+        fun finishRecording() {
+            recordingMs = null
+            recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms) }
+        }
+        val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+        ) { granted -> if (granted) startRecording() else micError = context.getString(R.string.a22_voice_permission) }
+        LaunchedEffect(recordingMs != null) {
+            while (recordingMs != null) { recordingMs = recorder.elapsedMs(); kotlinx.coroutines.delay(250) }
+        }
+        LaunchedEffect(recorderLimit) { if (recorderLimit) { recorderLimit = false; if (recorder.active) finishRecording() } }
+        DisposableEffect(recorder) { onDispose { recorder.cancel() } }
+        micError?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+
+        if (recordingMs != null) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { recorder.cancel(); recordingMs = null }) { Text(stringResource(R.string.ui_19766ed6cc)) }
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.size(10.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MaterialTheme.colorScheme.error))
+                Spacer(Modifier.width(8.dp))
+                Text(VoiceNotes.clock(((recordingMs ?: 0L) / 1000).toInt()), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                FilledIconButton(onClick = { finishRecording() }) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
+            }
+        } else {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
@@ -387,10 +424,21 @@ private fun GroupRoomView(
                 placeholder = { Text(stringResource(R.string.ui_5413c3c10b)) }
             )
             Spacer(Modifier.width(8.dp))
-            FilledIconButton(
-                enabled = (input.trim().isNotBlank() || active.composerAttachments.isNotEmpty()) && !actionBusy,
-                onClick = { val value = input.trim(); input = ""; onSend(value) }
-            ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
+            if (input.isBlank() && active.composerAttachments.isEmpty()) {
+                FilledIconButton(
+                    enabled = !actionBusy,
+                    onClick = {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) startRecording()
+                        else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                    }
+                ) { Icon(Icons.Default.Mic, stringResource(R.string.group_voice_note)) }
+            } else {
+                FilledIconButton(
+                    enabled = !actionBusy,
+                    onClick = { val value = input.trim(); input = ""; onSend(value) }
+                ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
+            }
+        }
         }
     }
 
@@ -561,6 +609,10 @@ private fun RoomAttachment(eventId: String, attachment: GroupAttachment) {
         }
         // Failed to load: fall through to a tappable card so the file is still reachable.
     }
+    if (VoiceNotes.isVoiceNote(attachment)) {
+        VoiceNotePlayer(eventId, attachment)
+        return
+    }
     OutlinedCard(
         onClick = { actions.onOpen(eventId, attachment) },
         modifier = Modifier.padding(top = 4.dp).fillMaxWidth()
@@ -592,4 +644,59 @@ private fun decodeScaled(bytes: ByteArray, maxEdge: Int = 1280): android.graphic
     var sample = 1
     while (bounds.outWidth / (sample * 2) >= maxEdge || bounds.outHeight / (sample * 2) >= maxEdge) sample *= 2
     return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+}
+
+
+/** Play button + duration for a voice note; the audio is fetched on the first tap, then played from a cache file. */
+@Composable
+private fun VoiceNotePlayer(eventId: String, attachment: GroupAttachment) {
+    val actions = LocalGroupAttachmentActions.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var player by remember(attachment.attachmentId) { mutableStateOf<android.media.MediaPlayer?>(null) }
+    var playing by remember(attachment.attachmentId) { mutableStateOf(false) }
+    var loading by remember(attachment.attachmentId) { mutableStateOf(false) }
+    var failed by remember(attachment.attachmentId) { mutableStateOf(false) }
+    var positionSec by remember(attachment.attachmentId) { mutableIntStateOf(0) }
+    val totalSec = VoiceNotes.durationSeconds(attachment.name) ?: player?.let { it.duration / 1000 } ?: 0
+    DisposableEffect(attachment.attachmentId) { onDispose { player?.release(); player = null } }
+    LaunchedEffect(playing) {
+        while (playing) { positionSec = (player?.currentPosition ?: 0) / 1000; kotlinx.coroutines.delay(300) }
+    }
+    fun toggle() {
+        val p = player
+        if (p != null) {
+            if (playing) { p.pause(); playing = false } else { p.start(); playing = true }
+            return
+        }
+        if (loading) return
+        loading = true; failed = false
+        scope.launch {
+            runCatching {
+                val file = actions.fetch(eventId, attachment)
+                val tmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    java.io.File.createTempFile("hermes-play-", ".m4a", context.cacheDir).apply { writeBytes(file.bytes); deleteOnExit() }
+                }
+                val mp = android.media.MediaPlayer()
+                mp.setDataSource(tmp.path)
+                mp.setOnCompletionListener { playing = false; positionSec = 0; it.seekTo(0) }
+                mp.prepare()
+                tmp.delete()
+                player = mp; mp.start(); playing = true
+            }.onFailure { failed = true }
+            loading = false
+        }
+    }
+    Row(Modifier.padding(top = 4.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        FilledTonalIconButton(onClick = { toggle() }, enabled = !loading) {
+            if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            else Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, stringResource(if (playing) R.string.group_voice_pause else R.string.group_voice_play))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (failed) "Couldn't load audio" else if (playing || positionSec > 0) "${VoiceNotes.clock(positionSec)} / ${VoiceNotes.clock(totalSec)}" else VoiceNotes.clock(totalSec),
+            style = MaterialTheme.typography.labelMedium,
+            color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
 }

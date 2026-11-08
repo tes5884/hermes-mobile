@@ -199,6 +199,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                             com.nousresearch.hermesmobile.ui.screens.GroupAttachmentActions(
                                 onAttach = vm::addGroupAttachments,
                                 onRemove = vm::removeGroupAttachment,
+                                onSendVoice = vm::sendGroupVoiceNote,
                                 fetch = { eventId, att -> vm.fetchGroupAttachment(eventId, att) },
                                 onOpen = vm::openGroupAttachment
                             )
@@ -226,6 +227,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onNewChat = vm::newBotSideChat,
                         onEdit = vm::editBot,
                         onSaveEditor = vm::saveBotEditor,
+                        onSetPinned = vm::setBotPinned,
                         onCloseEditor = vm::closeBotEditor,
                         onDelete = vm::deleteBot,
                         onRefreshGroups = vm::refreshGroups,

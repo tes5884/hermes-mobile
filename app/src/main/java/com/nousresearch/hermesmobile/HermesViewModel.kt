@@ -2179,6 +2179,57 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    /**
+     * Voice note in a room: transcribe on the gateway, then send the transcript as the message text with the audio
+     * attached (bots read the text; people can play the audio). If transcription fails the audio still goes out with
+     * a placeholder, since a room message can't be edited afterwards.
+     */
+    fun sendGroupVoiceNote(file: java.io.File, durationMs: Long) {
+        val repo = repository
+        val active = uiState.activeGroup
+        if (repo == null || active == null || uiState.groupActionBusy) { file.delete(); return }
+        val threadId = active.replyThreadId
+        viewModelScope.launch {
+            uiState = uiState.copy(groupActionBusy = true, error = null)
+            var transcribeError: String? = null
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) {
+                    require(file.length() in 1..com.nousresearch.hermesmobile.data.VoiceNotes.MAX_BYTES) { "Recording is too large" }
+                    file.readBytes()
+                }
+                val transcript = runCatching {
+                    val dataUrl = "data:audio/mp4;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                    repo.rest.scopedApi(
+                        uiState.selectedProfile, "/api/audio/transcribe", "POST",
+                        JSONObject().put("data_url", dataUrl).put("mime_type", "audio/mp4"), 180
+                    ).optString("transcript")
+                }.onFailure { transcribeError = it.message ?: "transcription failed" }.getOrNull()
+                val name = com.nousresearch.hermesmobile.data.VoiceNotes.fileName(durationMs, System.currentTimeMillis())
+                repo.sendGroupMessage(
+                    active.room.roomId, com.nousresearch.hermesmobile.data.VoiceNotes.messageText(transcript), threadId,
+                    listOf(Triple(name, "audio/mp4", bytes))
+                )
+            }
+                .onSuccess { event ->
+                    val current = uiState.activeGroup
+                    if (current?.room?.roomId == active.room.roomId) {
+                        uiState = uiState.copy(
+                            activeGroup = current.copy(
+                                events = (current.events + event).associateBy { it.seq }.values.sortedBy { it.seq },
+                                cursor = maxOf(current.cursor, event.seq),
+                                latestSeq = maxOf(current.latestSeq, event.seq),
+                                replyThreadId = null
+                            ),
+                            groupActionBusy = false,
+                            snackbar = transcribeError?.let { "Voice note sent without a transcript: $it" } ?: uiState.snackbar
+                        )
+                    } else uiState = uiState.copy(groupActionBusy = false)
+                }
+                .onFailure { uiState = uiState.copy(groupActionBusy = false, error = it.message) }
+            file.delete()
+        }
+    }
+
     fun addGroupAttachments(uris: List<Uri>) {
         val active = uiState.activeGroup ?: return
         val resolver = getApplication<Application>().contentResolver
@@ -2835,6 +2886,21 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     uiState = uiState.copy(botEditorLoadingProfile = null, error = it.message)
                 }
             }
+        }
+    }
+
+    /** Pin / unpin from the Agents list. Saved on the gateway (ui_meta), so it syncs across devices. */
+    fun setBotPinned(profile: HermesProfile, pinned: Boolean) {
+        val repo = repository ?: return
+        viewModelScope.launch {
+            runCatching { repo.setBotPinned(profile.name, pinned) }
+                .onSuccess { result ->
+                    if (result.uiMetaConflict || result.applied.any { !it.value }) {
+                        uiState = uiState.copy(error = string(R.string.i18n_vm_bot_conflict))
+                    }
+                    refreshProfiles(then = ::refreshBotRoster)
+                }
+                .onFailure { uiState = uiState.copy(error = it.message) }
         }
     }
 

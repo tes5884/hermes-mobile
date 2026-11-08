@@ -91,6 +91,11 @@
     <string name="bots_section">Section</string>
     <string name="bots_section_other">Other</string>
     <string name="bots_view_list">List view</string>
+    <string name="group_voice_note">Record a voice note</string>
+    <string name="group_voice_play">Play voice note</string>
+    <string name="group_voice_pause">Pause voice note</string>
+    <string name="bots_pin">Pin to top</string>
+    <string name="bots_unpin">Unpin</string>
     <string name="bots_view_grid">Grid view</string>
     <string name="bots_section_toggle">Show or hide %1$s</string>
 </resources>

@@ -645,6 +645,18 @@ class HermesRepository(
         return result
     }
 
+    /** Flip ui_meta["hermes-bots"].pinned for one bot straight from the Agents list (same CAS path as the editor). */
+    suspend fun setBotPinned(profileName: String, pinned: Boolean): BotSaveResult {
+        val fresh = rpcProfiles().firstOrNull { it.name == profileName } ?: error("Profile $profileName not found")
+        val previous = fresh.uiMeta?.optJSONObject(BOT_META_KEY)
+        val next = if (previous != null) JSONObject(previous.toString()) else JSONObject()
+        next.put("pinned", pinned)
+        val payload = JSONObject().put("name", profileName).put("profile", profileName)
+            .put("ui_meta", JSONObject().put(BOT_META_KEY, next))
+            .put("ui_meta_expected_revisions", JSONObject().put(BOT_META_KEY, fresh.uiMetaRevisions[BOT_META_KEY] ?: 0))
+        return parseBotSaveResult(gateway.requestObject("profiles.configure", payload, timeoutMs = 60_000))
+    }
+
     suspend fun confirmBotModelSwitch(profile: String, provider: String, model: String): BotSaveResult {
         require(provider.isNotBlank() && model.isNotBlank()) { "Provider and model are required" }
         val result = gateway.requestObject(

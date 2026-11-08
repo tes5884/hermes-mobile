@@ -57,6 +57,7 @@ fun BotsScreen(
     onSaveEditor: (BotProfileConfig) -> Unit,
     onCloseEditor: () -> Unit,
     onDelete: (HermesProfile) -> Unit,
+    onSetPinned: (HermesProfile, Boolean) -> Unit,
     onRefreshGroups: () -> Unit,
     onCreateGroup: (String, Set<String>) -> Unit,
     onOpenGroup: (GroupRoom) -> Unit,
@@ -152,7 +153,8 @@ fun BotsScreen(
                     onOpen = { onOpen(profile) },
                     onNewChat = { onNewChat(profile) },
                     onEdit = { onEdit(profile) },
-                    onDelete = { deleteCandidate = profile }
+                    onDelete = { deleteCandidate = profile },
+                    onTogglePin = { onSetPinned(profile, !profile.botPinned) }
                 )
             }
             LazyVerticalGrid(
@@ -187,7 +189,7 @@ fun BotsScreen(
                                 BotRow(
                                     routed = routed, avatarDataUrl = avatar, dot = dot,
                                     onSwitchConnection = a.onSwitchConnection, onOpen = a.onOpen,
-                                    onNewChat = a.onNewChat, onEdit = a.onEdit, onDelete = a.onDelete
+                                    onNewChat = a.onNewChat, onEdit = a.onEdit, onDelete = a.onDelete, onTogglePin = a.onTogglePin
                                 )
                                 HorizontalDivider(Modifier.padding(start = 68.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = .22f))
                             }
@@ -215,7 +217,7 @@ fun BotsScreen(
             saving = editorSaving,
             onDismiss = onCloseEditor,
             onSave = onSaveEditor,
-            sectionOptions = remember(allBots) { botSections(allBots).map { it.first }.filter { it != "Other" } }
+            sectionOptions = remember(allBots) { allBots.map { botSection(it) }.filter { it.isNotBlank() }.distinct().sortedBy { it.lowercase() } }
         )
     }
 
@@ -266,7 +268,8 @@ private fun BotRow(
     onOpen: () -> Unit,
     onNewChat: () -> Unit,
     onEdit: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onTogglePin: () -> Unit
 ) {
     var menu by remember { mutableStateOf(false) }
     val profile = routed.profile
@@ -349,6 +352,11 @@ private fun BotRow(
                         onClick = { menu = false; onNewChat() }
                     )
                     DropdownMenuItem(
+                        text = { Text(stringResource(if (profile.botPinned) R.string.bots_unpin else R.string.bots_pin)) },
+                        leadingIcon = { Icon(Icons.Default.PushPin, null) },
+                        onClick = { menu = false; onTogglePin() }
+                    )
+                    DropdownMenuItem(
                         text = { Text(stringResource(R.string.ui_c0cd1fd055)) },
                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                         onClick = { menu = false; onEdit() }
@@ -421,7 +429,8 @@ private class BotActions(
     val onOpen: () -> Unit,
     val onNewChat: () -> Unit,
     val onEdit: () -> Unit,
-    val onDelete: () -> Unit
+    val onDelete: () -> Unit,
+    val onTogglePin: () -> Unit
 )
 
 /** Names the roster was filed under before the Section field existed, so a fresh install shows the departments. */
@@ -435,10 +444,16 @@ internal fun botSection(bot: RoutedBot): String =
     bot.profile.botSection.ifBlank { DEFAULT_SECTIONS[bot.profile.name.lowercase()].orEmpty() }
 
 /** Sections alphabetical, unassigned bots under "Other" last; bots alphabetical inside each. */
-internal fun botSections(bots: List<RoutedBot>): List<Pair<String, List<RoutedBot>>> =
-    bots.groupBy { botSection(it).ifBlank { "Other" } }
+internal fun botSections(bots: List<RoutedBot>): List<Pair<String, List<RoutedBot>>> {
+    // Pinned bots live only in a "Pinned" section above every department (not repeated below), A-Z.
+    val (pinned, rest) = bots.partition { it.profile.botPinned }
+    val departments = rest.groupBy { botSection(it).ifBlank { "Other" } }
         .map { (name, list) -> name to list.sortedBy { it.label.lowercase() } }
         .sortedWith(compareBy({ it.first == "Other" }, { it.first.lowercase() }))
+    return if (pinned.isEmpty()) departments else listOf(PINNED_SECTION to pinned.sortedBy { it.label.lowercase() }) + departments
+}
+
+internal const val PINNED_SECTION = "Pinned"
 
 @Composable
 private fun SectionHeader(name: String, count: Int, collapsed: Boolean, onToggle: () -> Unit) {
@@ -477,7 +492,13 @@ private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousrese
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Text(profile.label.substringBefore('|').trim(), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                Text(profile.label.substringBefore('|').trim(), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (profile.botPinned) {
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Default.PushPin, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             Text(role, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 if (!routed.activeConnection) {
@@ -485,6 +506,7 @@ private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousrese
                 } else {
                     DropdownMenuItem(text = { Text(stringResource(R.string.ui_885b06da76)) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Chat, null) }, onClick = { menu = false; a.onOpen() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.ui_b13f96dc48)) }, leadingIcon = { Icon(Icons.Default.AddComment, null) }, onClick = { menu = false; a.onNewChat() })
+                    DropdownMenuItem(text = { Text(stringResource(if (profile.botPinned) R.string.bots_unpin else R.string.bots_pin)) }, leadingIcon = { Icon(Icons.Default.PushPin, null) }, onClick = { menu = false; a.onTogglePin() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.ui_c0cd1fd055)) }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = { menu = false; a.onEdit() })
                     if (!profile.isDefault) DropdownMenuItem(text = { Text(stringResource(R.string.ui_f53f5a6eb1)) }, leadingIcon = { Icon(Icons.Default.DeleteOutline, null) }, onClick = { menu = false; a.onDelete() })
                 }
