@@ -15,13 +15,13 @@ server plugin it needs for notifications.
 - **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 - **Group chats open where you left off.** The phone remembers the newest message you saw in each room (the gateway has no read marker for rooms). A "New messages" divider marks the first message from a bot after that point, and a "↓ N new" button jumps to the newest.
 - **Unread markers on Agents and Groups.** Agents with an unread chat (the server's flag, shared with Desktop) and rooms with bot messages after your last-seen point show a bold name and an accent pill or dot, also on the tab labels. Your own messages and status lines never count; order is unchanged.
+- **Agents grid and sections.** The Agents list has a grid view next to the list view, and bots can be filed under a section (a free-text "Section" field in the bot editor, saved in the bot's `ui_meta` with the rest of its look). Sections are collapsible, and bots without one are under "Other".
+- **Pin agents from the Agents list.** The menu of a bot has Pin to top / Unpin. Pinned bots show first, in a Pinned section, with a pin mark, and the choice is saved in the bot's `ui_meta`, so it syncs across devices.
 
 ### Fixed
 
 - **Group chats open at the newest message.** A room now uses a reversed list like the 1:1 transcript: it opens at the latest message, stays pinned there as new ones arrive, and does not move a reader who scrolled up.
 - **Images posted in group chats now show.** `MEDIA:<path>` images in a room had no chat session to download through, so the preview was skipped. Rooms now read the file by path with the posting bot's profile, for images and audio.
-- **Agents grid and sections.** The Agents list has a grid view next to the list view, and bots can be filed under a section (a free-text "Section" field in the bot editor, saved in the bot's `ui_meta` with the rest of its look). Sections are collapsible, and bots without one are under "Other".
-- **Pin agents from the Agents list.** The menu of a bot has Pin to top / Unpin. Pinned bots show first, in a Pinned section, with a pin mark, and the choice is saved in the bot's `ui_meta`, so it syncs across devices.
 
 ## [0.3.0-beta.15] - 2026-10-31
 
