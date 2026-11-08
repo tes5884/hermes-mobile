@@ -15,6 +15,7 @@
     <string name="push_inbox">Recent notifications</string>
     <string name="push_empty">No notifications yet</string>
     <string name="push_open_chat">Open conversation</string>
+    <string name="push_open_file">Open</string>
     <string name="copy_code">Copy code</string>
     <string name="preview">Preview</string>
     <string name="page_previous">Previous page</string>

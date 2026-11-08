@@ -57,7 +57,8 @@ fun PushSettings(
     onMenu: () -> Unit,
     onOpen: (JSONObject) -> Unit,
     onAskHermes: (profile: String, prompt: String) -> Unit,
-    runCommand: suspend (profile: String, name: String, arg: String) -> String
+    runCommand: suspend (profile: String, name: String, arg: String) -> String,
+    downloadFile: suspend (profile: String, path: String, output: java.io.File) -> String
 ) {
     // Each Hermes profile pairs separately; switching here does not change the app's selected profile.
     var profile by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(initialProfile) }
@@ -68,7 +69,10 @@ fun PushSettings(
     selectedEvent?.let { event ->
         AlertDialog(onDismissRequest = { selectedEvent = null }, title = { Text(event.optString("title", "Hermes")) },
             text = { Box(Modifier.heightIn(max = 500.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
-                com.nousresearch.hermesmobile.ui.components.MarkdownLite(event.optString("body"))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    com.nousresearch.hermesmobile.ui.components.MarkdownLite(PushMedia.text(event.optString("body")))
+                    PushFiles(event, downloadFile)
+                }
             } }, confirmButton = { TextButton(onClick = { selectedEvent = null }) { Text(stringResource(R.string.back)) } })
     }
     val store = remember { PushStore(context) }
@@ -413,6 +417,7 @@ fun PushSettings(
                     val (title, body) = PushDelivery.presentation(context, event)
                     Text(title, style = MaterialTheme.typography.titleSmall)
                     Text(body, maxLines = 8)
+                    PushFiles(event, downloadFile)
                     if (linked) Text(stringResource(R.string.push_open_chat), color = MaterialTheme.colorScheme.primary)
                 }
             }
@@ -595,3 +600,41 @@ private fun askPrompt(res: android.content.res.Resources, state: ServerState): S
 
 /** Where users (and their agent) get the server plugin. */
 const val PLUGIN_REPO_URL = "https://github.com/adrianlaborda/hermes-android-plugin"
+
+
+/** One tappable card per file a notice carries (`MEDIA:` lines): downloads it from the server, then opens it. */
+@Composable
+internal fun PushFiles(event: JSONObject, downloadFile: suspend (profile: String, path: String, output: java.io.File) -> String) {
+    val paths = remember(event) { PushMedia.paths(event.optString("body")) }
+    if (paths.isEmpty()) return
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember(event) { mutableStateOf<String?>(null) }
+    var failure by remember(event) { mutableStateOf<String?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        paths.forEach { path ->
+            val name = PushMedia.name(path)
+            OutlinedCard(onClick = {
+                if (busy != null) return@OutlinedCard
+                busy = path; failure = null
+                scope.launch {
+                    val file = com.nousresearch.hermesmobile.features.MobileFiles.target(context, path)
+                    try {
+                        val mime = withContext(Dispatchers.IO) { downloadFile(event.optString("profile"), path, file) }
+                        com.nousresearch.hermesmobile.features.MobileFiles.share(
+                            context, com.nousresearch.hermesmobile.features.ExportedFile(file, mime, name), open = true)
+                    } catch (e: CancellationException) { file.delete(); throw e }
+                    catch (e: Exception) { file.delete(); failure = e.message ?: e.javaClass.simpleName }
+                    finally { busy = null }
+                }
+            }, modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                    if (busy == path) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Text(stringResource(R.string.push_open_file), color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        failure?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+    }
+}

@@ -390,7 +390,8 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onMenu = openDrawer,
                         onOpen = vm::openNotification,
                         onAskHermes = { profile, prompt -> vm.askHermes(prompt, profile) },
-                        runCommand = { profile, name, arg -> vm.pluginCommand(profile, name, arg) }
+                        runCommand = { profile, name, arg -> vm.pluginCommand(profile, name, arg) },
+                        downloadFile = vm::downloadPushFile
                     )
                     MainSection.APPEARANCE -> AppearanceScreen(openDrawer)
                     MainSection.ASSISTANT -> AssistantScreen(openDrawer, s.profiles.map { it.name })

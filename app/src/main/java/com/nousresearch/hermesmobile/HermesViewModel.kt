@@ -2430,6 +2430,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     /** Opens a fresh chat with [prompt] waiting in the composer (the user reviews and sends it). */
     fun askHermes(prompt: String, profile: String = mainProfile()) = newWorkspaceChat(profile, "", null, draft = prompt)
 
+    /** Downloads a server file named by a push notice (`MEDIA:` path) the way chat replies fetch theirs; returns its MIME type. */
+    suspend fun downloadPushFile(profile: String, path: String, output: java.io.File): String {
+        val repo = repository ?: throw IllegalStateException(string(R.string.a23_not_connected))
+        return repo.rest.downloadFile(profile, path, null, output)
+    }
+
     /**
      * Runs a plugin slash command over the authenticated chat connection (`command.dispatch`), whose
      * output never enters the model's history. A session of [profile] binds it to that profile;

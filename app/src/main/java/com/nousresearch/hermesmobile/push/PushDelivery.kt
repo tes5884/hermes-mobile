@@ -106,7 +106,10 @@ object PushDelivery {
     fun presentation(context: Context, event: JSONObject): Pair<String, String> {
         val type = event.optString("event_type")
         val title = event.optString("title").ifBlank { "Hermes" }
-        val body = event.optString("body")
+        val rawBody = event.optString("body")
+        // A file notice shows its caption (or the file's name), never the server path.
+        val files = PushMedia.paths(rawBody)
+        val body = if (files.isEmpty()) rawBody else PushMedia.text(rawBody).ifBlank { PushMedia.name(files.first()) }
         return when (type) {
             // Plugin 0.5.3+: title = the chat, body = "…to continue: <what the action does>".
             "approval_required" -> {
