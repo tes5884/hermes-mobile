@@ -125,6 +125,7 @@ internal fun ChatThread(
     val attachmentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) actions.onAttach(uris)
     }
+    val takePhoto = rememberTakePhoto { actions.onAttach(listOf(it)) }
     // Reverse layout: index 0 is the bottom lane, so a fresh state already rests on the
     // latest message. See ChatScrollPolicy.kt for why there is no follow scroll.
     val state = key(conversationIdentity) { rememberLazyListState() }
@@ -359,6 +360,7 @@ internal fun ChatThread(
                 onDraftChange = actions.onDraftChange,
                 onRemoveAttachment = actions.onRemoveAttachment,
                 onAttach = { attachmentLauncher.launch(arrayOf("*/*")) },
+                onTakePhoto = takePhoto,
                 onModel = { actions.onRefreshSessionMeta(); showModelDialog = true },
                 onContext = actions.onContext,
                 onSend = send,

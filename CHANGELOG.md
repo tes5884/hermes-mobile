@@ -15,6 +15,7 @@ server plugin it needs for notifications.
 - **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 - **Group chats open where you left off.** The phone remembers the newest message you saw in each room (the gateway has no read marker for rooms). A "New messages" divider marks the first message from a bot after that point, and a "↓ N new" button jumps to the newest.
 - **Voice notes in group chats.** Hold the microphone in the room composer to record and release to send; slide left to cancel or up to lock hands-free (10 minutes at most). A live waveform shows while recording, and the note appears at once with a "Transcribing…" spinner, with Retry or Send audio only if transcription fails. The transcript is sent as the message text with the audio attached, so bots read it and people can play it.
+- **Take a photo to attach.** The attach menu of a 1:1 chat and the paperclip in a group chat offer "Take photo": the camera permission is asked on first use, the picture is captured with `TakePicture` into a `FileProvider` cache file, and a preview with Use or Retake comes before it is sent like any picked image.
 
 ### Changed
 

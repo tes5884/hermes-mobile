@@ -53,6 +53,7 @@ internal fun ChatComposer(
     onDraftChange: (String) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onAttach: () -> Unit,
+    onTakePhoto: () -> Unit = {},
     onModel: () -> Unit,
     onContext: () -> Unit,
     onSend: (String) -> Unit,
@@ -121,6 +122,10 @@ internal fun ChatComposer(
                             leadingIcon = { Icon(Icons.Default.AttachFile, null) },
                             enabled = attachments.size < 6,
                             onClick = { composerMenu = false; onAttach() })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) },
+                            leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
+                            enabled = attachments.size < 6,
+                            onClick = { composerMenu = false; onTakePhoto() })
                         DropdownMenuItem(text = { Text(stringResource(R.string.a22_commands)) },
                             leadingIcon = { Icon(Icons.Default.Code, null) },
                             onClick = { composerMenu = false; if (!draft.startsWith("/")) onDraftChange("/") })

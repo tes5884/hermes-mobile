@@ -33,6 +33,10 @@
     <string name="chat_dismiss_voice">Cancelar o cerrar audio</string>
     <string name="chat_more_actions">Adjuntos y acciones del chat</string>
     <string name="chat_attach">Adjuntar archivos</string>
+    <string name="chat_take_photo">Tomar foto</string>
+    <string name="photo_use">Usar foto</string>
+    <string name="photo_retake">Repetir</string>
+    <string name="photo_camera_denied">El permiso de la cámara está desactivado. Actívalo en Ajustes para tomar fotos.</string>
     <string name="chat_steer">Usar el borrador para redirigir la respuesta</string>
     <string name="chat_queue_hint">Añadir a la cola…</string>
     <string name="chat_message_hint">Escribe a Hermes…</string>
