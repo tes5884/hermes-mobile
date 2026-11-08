@@ -12,6 +12,7 @@ server plugin it needs for notifications.
 ### Added
 
 - **Attach files and photos in group chats.** The room composer has a paperclip like the 1:1 composer (up to 8 files, 25 MB in total), and attachments in a room show as inline images or tappable file cards, using the gateway's `groups.attachment.upload` and `groups.attachment.download`.
+- **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 
 ### Fixed
 

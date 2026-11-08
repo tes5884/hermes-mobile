@@ -739,7 +739,7 @@ private fun QueueLane(
 
 /** Date separator — centered timestamp between dashed hairlines, like the reference UI. */
 @Composable
-private fun DaySeparatorRow(label: String) {
+internal fun DaySeparatorRow(label: String) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         DashedDivider(Modifier.weight(1f))
         Text(label, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall,
@@ -767,7 +767,7 @@ private fun chatDisplayRows(timeline: List<ChatTimelineItem>): List<ChatDisplayR
 }
 
 @Composable
-private fun dayLabel(millis: Long): String {
+internal fun dayLabel(millis: Long): String {
     val context = LocalContext.current
     val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
     val zoned = java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault())
