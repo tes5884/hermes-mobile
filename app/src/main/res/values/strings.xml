@@ -91,6 +91,7 @@
     <string name="bots_section">Section</string>
     <string name="bots_section_other">Other</string>
     <string name="bots_view_list">List view</string>
+    <string name="group_new_messages">New messages</string>
     <string name="group_voice_note">Record a voice note</string>
     <string name="group_voice_play">Play voice note</string>
     <string name="group_voice_pause">Pause voice note</string>

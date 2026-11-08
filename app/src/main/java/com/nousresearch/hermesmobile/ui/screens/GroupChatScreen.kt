@@ -10,6 +10,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
@@ -264,7 +265,48 @@ private fun GroupRoomView(
     // latest message, stays pinned there as events arrive, and never moves a reader who scrolled up.
     val listState = remember(active.room.roomId) { androidx.compose.foundation.lazy.LazyListState() }
     val visibleEvents = remember(active.events) { active.events.filter { shouldRenderRoomEvent(it) } }
-    val reversedRows = remember(visibleEvents) { RoomRows.build(visibleEvents).asReversed() }
+    // Phone-side "where I left off": the highest seq shown per room. The divider is fixed when the room opens and
+    // stays until he leaves it; the saved position only moves once the initial scroll is done.
+    val readPrefs = LocalContext.current.getSharedPreferences("hermes_room_read", android.content.Context.MODE_PRIVATE)
+    val roomKey = active.room.roomId
+    val initialSaved = remember(roomKey) { RoomRead.load(readPrefs, roomKey) }
+    var dividerSeq by remember(roomKey) { mutableStateOf<Long?>(null) }
+    var anchored by remember(roomKey) { mutableStateOf(false) }
+    var ready by remember(roomKey) { mutableStateOf(false) }
+    var seenSeq by remember(roomKey) { mutableLongStateOf(initialSaved ?: 0L) }
+    val reversedRows = remember(visibleEvents, dividerSeq) { RoomRows.build(visibleEvents, newMessagesBeforeSeq = dividerSeq).asReversed() }
+    LaunchedEffect(roomKey, visibleEvents.isNotEmpty()) {
+        if (visibleEvents.isNotEmpty() && !anchored) {
+            anchored = true
+            dividerSeq = RoomRead.firstUnreadSeq(visibleEvents, initialSaved)
+            if (dividerSeq == null) ready = true
+        }
+    }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    LaunchedEffect(dividerSeq) {
+        val target = dividerSeq ?: return@LaunchedEffect
+        val idx = reversedRows.indexOfFirst { it is RoomRow.NewMessages }
+        if (idx >= 0) {
+            listState.scrollToItem(idx)
+            // The divider now sits at the bottom edge; move the list back toward the newest so it lands near the top.
+            val h = listState.layoutInfo.viewportSize.height
+            if (h > 0) listState.scrollBy(-(h - with(density) { 96.dp.toPx() }).coerceAtLeast(0f))
+        }
+        ready = true
+    }
+    LaunchedEffect(roomKey, ready) {
+        if (!ready) return@LaunchedEffect
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? String)?.takeIf { k -> k.startsWith("e:") }?.drop(2)?.toLongOrNull() }.maxOrNull() ?: 0L
+        }.collect { top ->
+            if (top > seenSeq) { seenSeq = top; RoomRead.save(readPrefs, roomKey, top) }
+        }
+    }
+    LaunchedEffect(roomKey, ready, visibleEvents) {
+        if (!ready) return@LaunchedEffect
+        val own = RoomRead.newestOwnSeq(visibleEvents)
+        if (own > seenSeq) { seenSeq = own; RoomRead.save(readPrefs, roomKey, own) }
+    }
     val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
     val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
 
@@ -332,16 +374,18 @@ private fun GroupRoomView(
                 Text(stringResource(R.string.ui_ea79140946), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
                 reverseLayout = true,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(reversedRows, key = { it.key }) { row ->
                     when (row) {
                         is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
+                        is RoomRow.NewMessages -> NewMessagesRow()
                         is RoomRow.Event -> {
                             val event = row.event
                             RoomEventRow(
@@ -353,6 +397,24 @@ private fun GroupRoomView(
                         }
                     }
                 }
+            }
+            val awayFromBottom = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
+            if (awayFromBottom) {
+                val chipScope = rememberCoroutineScope()
+                Surface(
+                    onClick = { chipScope.launch { listState.animateScrollToItem(0) } },
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                ) {
+                    Text(
+                        RoomRead.chipLabel(RoomRead.unreadCount(visibleEvents, seenSeq)),
+                        Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
             }
         }
 
@@ -698,5 +760,17 @@ private fun VoiceNotePlayer(eventId: String, attachment: GroupAttachment) {
             style = MaterialTheme.typography.labelMedium,
             color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+
+/** "New messages" marker: sits above the first unread message and stays until the room is closed. */
+@Composable
+private fun NewMessagesRow() {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary.copy(alpha = .6f))
+        Text(stringResource(R.string.group_new_messages), Modifier.padding(horizontal = 10.dp), style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+        HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary.copy(alpha = .6f))
     }
 }
