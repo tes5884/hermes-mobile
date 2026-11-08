@@ -433,7 +433,13 @@ private fun RoomEventRow(
                         )
                         Spacer(Modifier.height(3.dp))
                     }
-                    if (event.text.isNotBlank()) com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(event.text))
+                    if (event.text.isNotBlank()) {
+                        val base = com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner.current
+                        val owner = remember(base, member?.profile) { base?.let { b -> member?.profile?.takeIf { it.isNotBlank() }?.let { b.copy(profile = it) } ?: b } }
+                        androidx.compose.runtime.CompositionLocalProvider(com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides owner) {
+                            com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(event.text))
+                        }
+                    }
                     event.attachments.forEach { RoomAttachment(event.eventId, it) }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (event.threadId.isNotBlank()) {

@@ -84,10 +84,10 @@ fun ChatArtifactPreview(destination: String, description: String) {
         error = null
         try {
             bitmap = withContext(Dispatchers.IO) {
-                owner.repo.rest.sessionMessagesPage(owner.session, owner.profile, limit = 1)
+                if (owner.session.isNotBlank()) owner.repo.rest.sessionMessagesPage(owner.session, owner.profile, limit = 1)
                 val file = MobileFiles.target(context, path)
                 try {
-                    val mime = owner.repo.rest.downloadFile(owner.profile, path, owner.session, file, maxBytes = 8L * 1024 * 1024)
+                    val mime = owner.repo.rest.downloadFile(owner.profile, path, owner.session.ifBlank { null }, file, maxBytes = 8L * 1024 * 1024)
                     require(mime.startsWith("image/")) { "Use Open to view this artifact" }
                     requireNotNull(com.nousresearch.hermesmobile.data.ImageDecode.file(file.path, 1200)) { "Unsupported image" }
                 } finally { file.delete() }

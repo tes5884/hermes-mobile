@@ -72,8 +72,8 @@ private fun OwnedAudioPlayer(owner: ArtifactOwner, path: String) {
             var adopted = false
             try {
                 withContext(Dispatchers.IO) {
-                    owner.repo.rest.sessionMessagesPage(owner.session, owner.profile, limit = 1)
-                    val mime = owner.repo.rest.downloadFile(owner.profile, path, owner.session, file, maxBytes = 32L * 1024 * 1024)
+                    if (owner.session.isNotBlank()) owner.repo.rest.sessionMessagesPage(owner.session, owner.profile, limit = 1)
+                    val mime = owner.repo.rest.downloadFile(owner.profile, path, owner.session.ifBlank { null }, file, maxBytes = 32L * 1024 * 1024)
                     require(mime.startsWith("audio/") || mime.substringBefore(';') == "application/octet-stream")
                 }
                 ensureActive()

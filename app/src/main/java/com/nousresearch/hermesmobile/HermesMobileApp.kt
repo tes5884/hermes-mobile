@@ -190,6 +190,11 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                     } }
                     MainSection.CHAT -> ChatRoute(vm, s, openDrawer)
                     MainSection.BOTS -> androidx.compose.runtime.CompositionLocalProvider(
+                        // Rooms have no chat session: a blank session makes MEDIA:<path> previews read the
+                        // file by path with the posting bot's profile (GroupChatScreen swaps the profile per event).
+                        com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides vm.featureRepository()?.let { r ->
+                            remember(r) { com.nousresearch.hermesmobile.ui.components.ArtifactOwner(r, "", "") {} }
+                        },
                         com.nousresearch.hermesmobile.ui.screens.LocalGroupAttachmentActions provides remember(vm) {
                             com.nousresearch.hermesmobile.ui.screens.GroupAttachmentActions(
                                 onAttach = vm::addGroupAttachments,
