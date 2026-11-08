@@ -19,6 +19,8 @@ server plugin it needs for notifications.
 
 - **Group chats open at the newest message.** A room now uses a reversed list like the 1:1 transcript: it opens at the latest message, stays pinned there as new ones arrive, and does not move a reader who scrolled up.
 - **Images posted in group chats now show.** `MEDIA:<path>` images in a room had no chat session to download through, so the preview was skipped. Rooms now read the file by path with the posting bot's profile, for images and audio.
+- **Agents grid and sections.** The Agents list has a grid view next to the list view, and bots can be filed under a section (a free-text "Section" field in the bot editor, saved in the bot's `ui_meta` with the rest of its look). Sections are collapsible, and bots without one are under "Other".
+- **Pin agents from the Agents list.** The menu of a bot has Pin to top / Unpin. Pinned bots show first, in a Pinned section, with a pin mark, and the choice is saved in the bot's `ui_meta`, so it syncs across devices.
 
 ## [0.3.0-beta.15] - 2026-10-31
 
