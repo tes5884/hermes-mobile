@@ -482,9 +482,10 @@ private fun GroupRoomView(
             recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms); pinTick++ }
         }
         fun cancelRecording() { recorder.cancel(); resetRecording() }
+        val voicePermissionMsg = stringResource(R.string.a22_voice_permission)
         val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-        ) { granted -> if (!granted) micError = context.getString(R.string.a22_voice_permission) } // allowed: he holds again
+        ) { granted -> if (!granted) micError = voicePermissionMsg } // allowed: he holds again
         fun hasMic() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
         LaunchedEffect(recordingMs != null) {
             while (recordingMs != null) {

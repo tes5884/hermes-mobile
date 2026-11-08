@@ -60,6 +60,31 @@ object ChatMarkdown {
             }
         }
     }
+    /** A bare URL found in plain text: [start, end) range in the text and the openable [url]. */
+    data class UrlSpan(val start: Int, val end: Int, val url: String)
+
+    private val bareUrl = Regex("""(?i)\b(?:https?://|www\.)[^\s<>]+""")
+
+    /** Finds bare http(s):// and www. URLs. Trailing punctuation and unbalanced closers are not part of the URL. */
+    fun findUrls(text: String): List<UrlSpan> = bareUrl.findAll(text).mapNotNull { m ->
+        var end = m.range.last + 1
+        val s = m.range.first
+        while (end > s) {
+            val c = text[end - 1]
+            val drop = when (c) {
+                '.', ',', ';', ':', '!', '?', '\'', '"', '*', '_', '}' -> true
+                ')' -> text.substring(s, end).let { it.count { x -> x == ')' } > it.count { x -> x == '(' } }
+                ']' -> text.substring(s, end).let { it.count { x -> x == ']' } > it.count { x -> x == '[' } }
+                else -> false
+            }
+            if (!drop) break
+            end--
+        }
+        val raw = text.substring(s, end)
+        val url = if (raw.startsWith("www.", true)) "https://$raw" else raw
+        if (raw.length > 4 && safeLink(url)) UrlSpan(s, end, url) else null
+    }.toList()
+
     fun safeLink(url: String): Boolean = runCatching {
         val uri = java.net.URI(url)
         uri.scheme?.lowercase() in setOf("http", "https", "mailto") &&
@@ -260,11 +285,23 @@ internal fun renderMarkdownInline(
     onLink: (String) -> Unit
 ): AnnotatedString =
         buildAnnotatedString {
+            var inLink = false
+            fun appendLinkified(text: String) {
+                var pos = 0
+                for (span in ChatMarkdown.findUrls(text)) {
+                    append(text.substring(pos, span.start))
+                    withLink(LinkAnnotation.Url(span.url, TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))) {
+                        runCatching { onLink(span.url) }
+                    }) { append(text.substring(span.start, span.end)) }
+                    pos = span.end
+                }
+                append(text.substring(pos))
+            }
             fun visit(n: Node, depth: Int) {
                 if (depth > 48) return
                 fun children() { n.children().forEach { visit(it, depth + 1) } }
                 when (n) {
-                    is MarkdownNodeText -> append(n.literal)
+                    is MarkdownNodeText -> if (inLink) append(n.literal) else appendLinkified(n.literal)
                     is Code -> withStyle(SpanStyle(fontFamily = com.nousresearch.hermesmobile.ui.theme.HermesMono, background = codeColor)) { append(n.literal) }
                     is StrongEmphasis -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { children() }
                     is Emphasis -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { children() }
@@ -275,7 +312,7 @@ internal fun renderMarkdownInline(
                     is MarkdownLink -> if (ChatMarkdown.safeLink(n.destination) || artifactPath(n.destination) != null) {
                         withLink(LinkAnnotation.Url(n.destination, TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))) {
                             runCatching { onLink(n.destination) }
-                        }) { children() }
+                        }) { val was = inLink; inLink = true; children(); inLink = was }
                     } else children()
                     is MarkdownImage -> when {
                         depth == 0 -> children()
