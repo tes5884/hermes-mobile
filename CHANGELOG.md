@@ -9,6 +9,10 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Approval cards in group chats show what is being approved.** The server nests the command and description under `approval`; the app read the top level and showed an empty card.
+
 ## [0.3.0-beta.15] - 2026-10-31
 
 ### Added
