@@ -68,8 +68,9 @@ object GroupAttachments {
     fun downloadParams(roomId: String, eventId: String, attachmentId: String): JSONObject =
         JSONObject().put("room_id", roomId).put("event_id", eventId).put("attachment_id", attachmentId)
 
-    fun sendPayload(text: String, threadId: String, attachments: List<GroupAttachment>): JSONObject {
+    fun sendPayload(text: String, threadId: String, attachments: List<GroupAttachment>, voice: Boolean = false): JSONObject {
         val payload = JSONObject().put("text", text).put("thread_id", threadId)
+        if (voice) payload.put("voice", true)
         if (attachments.isNotEmpty()) payload.put("attachments", JSONArray().also { a -> attachments.forEach { a.put(it.toManifest()) } })
         return payload
     }
@@ -98,7 +99,8 @@ object GroupAttachments {
         threadId: String,
         eventId: String,
         files: List<Triple<String, String, ByteArray>>,
-        newUploadId: () -> String
+        newUploadId: () -> String,
+        voice: Boolean = false
     ): JSONObject {
         require(files.size <= MAX_PER_MESSAGE) { "At most $MAX_PER_MESSAGE files per message" }
         require(files.sumOf { it.third.size.toLong() } <= MAX_MESSAGE_BYTES) { "Files total more than 25 MB" }
@@ -108,7 +110,7 @@ object GroupAttachments {
         }
         return request(
             "groups.send",
-            JSONObject().put("room_id", roomId).put("event_id", eventId).put("payload", sendPayload(text, threadId, manifests))
+            JSONObject().put("room_id", roomId).put("event_id", eventId).put("payload", sendPayload(text, threadId, manifests, voice))
         )
     }
 }

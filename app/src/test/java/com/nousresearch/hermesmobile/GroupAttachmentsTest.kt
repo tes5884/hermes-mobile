@@ -70,4 +70,9 @@ class GroupAttachmentsTest {
         val list = GroupAttachments.fromEvent(payload)
         assertEquals(1, list.size); assertEquals("image", list[0].kind)
     }
+
+    @Test fun voiceMarkerOnlyOnVoiceSends() {
+        assertTrue(GroupAttachments.sendPayload("hi", "t", emptyList(), voice = true).optBoolean("voice"))
+        assertFalse(GroupAttachments.sendPayload("hi", "t", emptyList()).has("voice"))
+    }
 }

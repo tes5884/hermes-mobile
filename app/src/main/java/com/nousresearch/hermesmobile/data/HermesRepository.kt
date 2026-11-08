@@ -1079,14 +1079,16 @@ class HermesRepository(
         roomId: String,
         text: String,
         threadId: String? = null,
-        files: List<Triple<String, String, ByteArray>> = emptyList()
+        files: List<Triple<String, String, ByteArray>> = emptyList(),
+        voice: Boolean = false
     ): GroupEvent {
         val actualThread = threadId?.takeIf { it.isNotBlank() } ?: "t-${UUID.randomUUID()}"
         val clientEventId = "mobile-${UUID.randomUUID()}"
         val result = GroupAttachments.sendWithAttachments(
             request = { method, params -> gateway.requestObject(method, params, timeoutMs = if (files.isEmpty()) 30_000 else 120_000) },
             roomId = roomId, text = text, threadId = actualThread, eventId = clientEventId, files = files,
-            newUploadId = { UUID.randomUUID().toString() }
+            newUploadId = { UUID.randomUUID().toString() },
+            voice = voice
         )
         return GroupEvent.fromJson(result.optJSONObject("event") ?: error("Hermes returned no room event"))
     }

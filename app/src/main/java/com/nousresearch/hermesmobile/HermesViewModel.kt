@@ -2280,7 +2280,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 val name = com.nousresearch.hermesmobile.data.VoiceNotes.fileName(note.durationMs, System.currentTimeMillis())
                 repo.sendGroupMessage(
                     note.roomId, com.nousresearch.hermesmobile.data.VoiceNotes.messageText(transcript), note.threadId,
-                    listOf(Triple(name, "audio/mp4", bytes))
+                    listOf(Triple(name, "audio/mp4", bytes)), voice = true
                 )
             }
                 .onSuccess { event ->
