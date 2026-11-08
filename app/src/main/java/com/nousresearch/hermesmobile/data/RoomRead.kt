@@ -18,6 +18,12 @@ object RoomRead {
     /** Tzvi's own newest message: sending counts as having read everything up to it. */
     fun newestOwnSeq(events: List<GroupEvent>): Long = events.filter { it.kind == "message.user" }.maxOfOrNull { it.seq } ?: 0L
 
+    /**
+     * Rooms-list badge: bot messages after the phone's last-seen marker. Tzvi's own messages and status lines never
+     * count, and a room never opened on this phone (no marker) shows nothing rather than its whole history.
+     */
+    fun listUnread(events: List<GroupEvent>, saved: Long?): Int = if (saved == null) 0 else unreadCount(events, saved)
+
     fun chipLabel(unread: Int): String = if (unread > 0) "↓ $unread new" else "↓"
 
     private fun key(roomId: String) = "seen:$roomId"

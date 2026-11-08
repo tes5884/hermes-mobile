@@ -7,6 +7,7 @@ import androidx.compose.ui.res.stringResource
 
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -68,7 +69,9 @@ fun BotsScreen(
     onStopGroup: () -> Unit,
     onRetryGroup: (GroupPendingAction) -> Unit,
     onApproveGroup: (GroupPendingAction, String) -> Unit,
-    onDisbandGroup: () -> Unit
+    onDisbandGroup: () -> Unit,
+    groupUnread: Map<String, Int> = emptyMap(),
+    botUnread: Set<String> = emptySet()
 ) {
     var page by remember { mutableIntStateOf(0) }
     var create by remember { mutableStateOf(false) }
@@ -117,8 +120,18 @@ fun BotsScreen(
         )
         DashedDivider(color = MaterialTheme.hermes.line)
         SecondaryTabRow(selectedTabIndex = page) {
-            Tab(selected = page == 0, onClick = { page = 0 }, text = { Text(stringResource(R.string.i18n_bots_tab, allBots.count { !it.profile.botHidden })) })
-            Tab(selected = page == 1, onClick = { page = 1; onRefreshGroups() }, text = { Text(stringResource(R.string.i18n_groups_tab, groupRooms.size)) })
+            Tab(selected = page == 0, onClick = { page = 0 }, text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.i18n_bots_tab, allBots.count { !it.profile.botHidden }))
+                    if (allBots.any { !it.profile.botHidden && it.profile.name in botUnread }) { Spacer(Modifier.width(6.dp)); UnreadPill(null) }
+                }
+            })
+            Tab(selected = page == 1, onClick = { page = 1; onRefreshGroups() }, text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.i18n_groups_tab, groupRooms.size))
+                    if (groupUnread.values.any { it > 0 }) { Spacer(Modifier.width(6.dp)); UnreadPill(null) }
+                }
+            })
         }
         if (page == 0) Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             com.nousresearch.hermesmobile.ui.components.HermesSearchField(search, { search = it }, stringResource(R.string.a14_search), Modifier.weight(1f))
@@ -139,7 +152,7 @@ fun BotsScreen(
             GroupsPanel(
                 profiles, routedBots, groupCapabilities, groupRooms, null, groupsLoading, groupActionBusy, groupError,
                 avatarAssets, onEnsureAvatar, onRefreshGroups, onCreateGroup, onOpenGroup, onCloseGroup,
-                onSendGroup, onReplyGroupThread, onRenameGroup, onStopGroup, onRetryGroup, onApproveGroup, onDisbandGroup
+                onSendGroup, onReplyGroupThread, onRenameGroup, onStopGroup, onRetryGroup, onApproveGroup, onDisbandGroup, groupUnread
             )
         } else if (bots.isEmpty()) {
             EmptyState(Icons.Default.SmartToy, stringResource(R.string.i18n_bots_empty), stringResource(R.string.i18n_bots_empty_hint)) {
@@ -183,11 +196,11 @@ fun BotsScreen(
                         val avatar = avatarAssets[profile.name].takeIf { routed.activeConnection }
                         val a = rowActions(routed)
                         if (gridView) {
-                            BotTile(routed, avatar, dot, a)
+                            BotTile(routed, avatar, dot, a, profile.name in botUnread)
                         } else {
                             Column {
                                 BotRow(
-                                    routed = routed, avatarDataUrl = avatar, dot = dot,
+                                    routed = routed, avatarDataUrl = avatar, dot = dot, unread = profile.name in botUnread,
                                     onSwitchConnection = a.onSwitchConnection, onOpen = a.onOpen,
                                     onNewChat = a.onNewChat, onEdit = a.onEdit, onDelete = a.onDelete, onTogglePin = a.onTogglePin
                                 )
@@ -264,6 +277,7 @@ private fun BotRow(
     routed: RoutedBot,
     avatarDataUrl: String?,
     dot: com.nousresearch.hermesmobile.data.SessionDot,
+    unread: Boolean,
     onSwitchConnection: () -> Unit,
     onOpen: () -> Unit,
     onNewChat: () -> Unit,
@@ -292,7 +306,7 @@ private fun BotRow(
                 Text(
                     profile.label,
                     style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -309,7 +323,7 @@ private fun BotRow(
             Text(
                 previewLine(profile.activityPreview).ifBlank { profile.description.ifBlank { profile.name } },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (unread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -320,6 +334,7 @@ private fun BotRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        if (unread) { UnreadPill(null); Spacer(Modifier.width(6.dp)) }
         // Only a problem is shown: green here would read as the status dot's "finished, unread".
         if (!(routed.reachable && profile.gatewayRunning)) {
             Icon(Icons.Default.CloudOff, stringResource(R.string.bot_offline), Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -473,7 +488,7 @@ private fun SectionHeader(name: String, count: Int, collapsed: Boolean, onToggle
 }
 
 @Composable
-private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousresearch.hermesmobile.data.SessionDot, a: BotActions) {
+private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousresearch.hermesmobile.data.SessionDot, a: BotActions, unread: Boolean) {
     var menu by remember { mutableStateOf(false) }
     val profile = routed.profile
     val role = profile.description.substringAfter('|', profile.description).trim().ifBlank { profile.name }
@@ -487,13 +502,14 @@ private fun BotTile(routed: RoutedBot, avatarDataUrl: String?, dot: com.nousrese
         Column(Modifier.padding(horizontal = 6.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Box {
                 ProfileAvatar(profile, size = 68, avatarDataUrl = avatarDataUrl)
+                if (unread) UnreadPill(null, Modifier.align(Alignment.TopEnd).border(2.dp, MaterialTheme.colorScheme.surfaceContainerLow, androidx.compose.foundation.shape.CircleShape))
                 if (dot != com.nousresearch.hermesmobile.data.SessionDot.NONE) {
                     Box(Modifier.align(Alignment.BottomEnd)) { com.nousresearch.hermesmobile.ui.components.SessionStatusDot(dot) }
                 }
             }
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                Text(profile.label.substringBefore('|').trim(), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(profile.label.substringBefore('|').trim(), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, fontWeight = if (unread) FontWeight.ExtraBold else FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (profile.botPinned) {
                     Spacer(Modifier.width(4.dp))
                     Icon(Icons.Default.PushPin, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)

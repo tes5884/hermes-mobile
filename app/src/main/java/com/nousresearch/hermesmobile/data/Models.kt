@@ -160,6 +160,13 @@ internal fun botActivity(canonical: JSONObject?, last: JSONObject?): JSONObject?
     else -> last
 }
 
+/** A bot is unread when the server says its canonical chat is (roster flag or the session list's flag). */
+internal fun botIsUnread(profile: HermesProfile, sessions: List<HermesSession>): Boolean {
+    if (profile.canonicalUnread) return true
+    val ids = setOfNotNull(profile.canonicalSession, profile.canonicalResolvedSession)
+    return ids.isNotEmpty() && sessions.any { it.unread && it.id in ids }
+}
+
 /** Gateway timestamps come in seconds or milliseconds; seconds here. */
 internal fun sessionEpochSeconds(ts: Long): Long = if (ts > 10_000_000_000L) ts / 1000L else ts
 
@@ -174,6 +181,8 @@ data class HermesProfile(
     val provider: String = "",
     val canonicalSession: String? = null,
     val canonicalResolvedSession: String? = null,
+    /** The server's own unread flag on the bot's canonical chat, when the roster carries it (also synced with desktop). */
+    val canonicalUnread: Boolean = false,
     val lastSession: String? = null,
     /** The newest message of the bot's freshest conversation and when it was active (Desktop's roster row). */
     val activityPreview: String = "",
@@ -214,6 +223,7 @@ data class HermesProfile(
                 provider = o.optString("provider"),
                 canonicalSession = canonical,
                 canonicalResolvedSession = canonicalResolved,
+                canonicalUnread = canonicalObject?.optBoolean("unread", false) ?: false,
                 lastSession = lastObject?.optStringOrNull("id") ?: o.optStringOrNull("last_session"),
                 activityPreview = TurnDisplay.preview(activity?.optString("preview").orEmpty()),
                 activityAt = activity?.let { sessionEpochSeconds(it.optLong("last_active", 0L)) } ?: 0L,

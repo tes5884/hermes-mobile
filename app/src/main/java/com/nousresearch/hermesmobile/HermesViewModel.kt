@@ -89,6 +89,8 @@ data class HermesUiState(
     val lastProfileExport: String? = null,
     val groupCapabilities: GroupCapabilities? = null,
     val groupRooms: List<GroupRoom> = emptyList(),
+    /** Room id -> bot messages after the phone's last-seen marker (see RoomRead.listUnread). */
+    val groupUnread: Map<String, Int> = emptyMap(),
     val groupsLoading: Boolean = false,
     val groupError: String? = null,
     val activeGroup: ActiveGroupRoom? = null,
@@ -2049,9 +2051,34 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     groupError = null
                 )
                 refreshBotRoster()
+                refreshGroupUnread(repo, rooms.filter { it.active })
             }.onFailure {
                 uiState = uiState.copy(groupsLoading = false, groupError = it.message)
             }
+        }
+    }
+
+    /** Only rooms whose newest seq moved past the saved marker are fetched (events since the marker, a few pages). */
+    private fun refreshGroupUnread(repo: com.nousresearch.hermesmobile.data.HermesRepository, rooms: List<GroupRoom>) {
+        val prefs = getApplication<android.app.Application>().getSharedPreferences("hermes_room_read", android.content.Context.MODE_PRIVATE)
+        viewModelScope.launch {
+            val counts = mutableMapOf<String, Int>()
+            for (room in rooms) {
+                val saved = com.nousresearch.hermesmobile.data.RoomRead.load(prefs, room.roomId) ?: continue
+                if (room.latestSeq <= saved) continue
+                runCatching {
+                    val events = mutableListOf<GroupEvent>()
+                    var cursor = saved
+                    for (i in 0 until 4) {
+                        val page = repo.groupLog(room.roomId, cursor)
+                        events += page.events
+                        if (!page.hasMore || page.cursor <= cursor) break
+                        cursor = page.cursor
+                    }
+                    com.nousresearch.hermesmobile.data.RoomRead.listUnread(events, saved)
+                }.getOrNull()?.takeIf { it > 0 }?.let { counts[room.roomId] = it }
+            }
+            uiState = uiState.copy(groupUnread = counts)
         }
     }
 

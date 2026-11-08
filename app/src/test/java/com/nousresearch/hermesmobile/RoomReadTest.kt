@@ -45,3 +45,29 @@ class RoomReadTest {
         assertTrue(RoomRows.build(events, java.time.ZoneOffset.UTC).none { it is RoomRow.NewMessages })
     }
 }
+
+class UnreadIndicatorsTest {
+    private fun ev(seq: Long, kind: String) =
+        GroupEvent("r", seq, "e$seq", kind, GroupActor.fromJson(JSONObject()), JSONObject())
+
+    @Test fun ownMessageAfterMarkerIsZero() {
+        assertEquals(0, RoomRead.listUnread(listOf(ev(5, "message.user"), ev(6, "message.user")), 4L))
+    }
+
+    @Test fun mixedBotAndStatusLinesCountsBotsOnly() {
+        val events = listOf(ev(5, "message.member"), ev(6, "turn.completed"), ev(7, "room.settled"), ev(8, "message.user"), ev(9, "message.member"))
+        assertEquals(2, RoomRead.listUnread(events, 4L))
+    }
+
+    @Test fun neverOpenedRoomShowsNothing() {
+        assertEquals(0, RoomRead.listUnread(listOf(ev(1, "message.member")), null))
+    }
+
+    @Test fun botUnreadFromRosterFlagOrSession() {
+        val p = HermesProfile(name = "ezra", canonicalSession = "s1")
+        assertFalse(botIsUnread(p, emptyList()))
+        assertTrue(botIsUnread(p.copy(canonicalUnread = true), emptyList()))
+        assertTrue(botIsUnread(p, listOf(HermesSession(id = "s1", unread = true))))
+        assertFalse(botIsUnread(p, listOf(HermesSession(id = "s2", unread = true))))
+    }
+}

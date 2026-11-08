@@ -240,7 +240,12 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onStopGroup = vm::stopGroup,
                         onRetryGroup = vm::retryGroupAction,
                         onApproveGroup = vm::approveGroupAction,
-                        onDisbandGroup = vm::disbandGroup
+                        onDisbandGroup = vm::disbandGroup,
+                        groupUnread = s.groupUnread,
+                        botUnread = remember(s.botRoster, s.sessions) {
+                            s.botRoster.filter { it.activeConnection && com.nousresearch.hermesmobile.data.botIsUnread(it.profile, s.sessions) }
+                                .map { it.profile.name }.toSet()
+                        }
                     ) }
                     MainSection.KANBAN -> KanbanScreen(
                         onMenu = openDrawer,
