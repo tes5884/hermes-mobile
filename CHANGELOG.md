@@ -15,6 +15,10 @@ server plugin it needs for notifications.
 - **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 - **Group chats open where you left off.** The phone remembers the newest message you saw in each room (the gateway has no read marker for rooms). A "New messages" divider marks the first message from a bot after that point, and a "↓ N new" button jumps to the newest.
 
+### Changed
+
+- **Group chat bubbles are tidier.** Bubbles fit their text with the same maximum width on both sides, the time sits at the bottom right of each bubble, bot messages have a single Reply action, long-press opens the thread, and the success "Room settled" line is hidden. Sending a message scrolls a room or a 1:1 chat to the newest message.
+
 ### Fixed
 
 - **Group chats open at the newest message.** A room now uses a reversed list like the 1:1 transcript: it opens at the latest message, stays pinned there as new ones arrive, and does not move a reader who scrolled up.

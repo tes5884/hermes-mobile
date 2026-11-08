@@ -214,6 +214,13 @@ internal fun ChatThread(
             state.animateScrollToItem(0)
         }
     }
+    // After a send, keep snapping to the newest row for a moment while the new message and the first reply row lay out.
+    var pinTick by remember(conversationIdentity) { mutableIntStateOf(0) }
+    var pinActive by remember(conversationIdentity) { mutableStateOf(false) }
+    LaunchedEffect(pinTick) {
+        if (pinTick > 0) { pinActive = true; state.scrollToItem(0); kotlinx.coroutines.delay(2500); pinActive = false }
+    }
+    LaunchedEffect(entries.size) { if (pinActive) state.scrollToItem(0) }
     val send: (String) -> Unit = send@{ text ->
         if (SlashCommands.local(text) == LocalSlash.MODEL) {
             actions.onDraftChange("")
@@ -224,6 +231,7 @@ internal fun ChatThread(
         actions.onSend(text)
         // Sending is the one moment we always re-pin the reader to the latest message.
         state.requestScrollToItem(0)
+        pinTick++
     }
     val copy: (String) -> Unit = { text ->
         haptics.performHapticFeedback(HapticFeedbackType.Confirm)
