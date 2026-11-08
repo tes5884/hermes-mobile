@@ -836,16 +836,22 @@ data class GroupPendingAction(
     val raw: JSONObject = JSONObject()
 ) {
     companion object {
-        fun fromJson(o: JSONObject): GroupPendingAction = GroupPendingAction(
-            kind = o.optString("kind"),
-            memberId = o.optString("member_id"),
-            taskId = o.optString("task_id"),
-            executionGeneration = o.optInt("execution_generation", 0),
-            requestId = o.optString("request_id"),
-            command = o.optString("command"),
-            description = o.optString("description"),
-            raw = o
-        )
+        // The server nests what is being approved under "approval" (hosted_room_driver._report_pending_action);
+        // top-level command/description are kept as a fallback.
+        fun fromJson(o: JSONObject): GroupPendingAction {
+            val a = o.optJSONObject("approval")
+            fun pick(key: String) = a?.optString(key).orEmpty().ifBlank { o.optString(key) }
+            return GroupPendingAction(
+                kind = o.optString("kind"),
+                memberId = o.optString("member_id"),
+                taskId = o.optString("task_id"),
+                executionGeneration = o.optInt("execution_generation", 0),
+                requestId = o.optString("request_id").ifBlank { a?.optString("request_id").orEmpty() },
+                command = pick("command"),
+                description = pick("description"),
+                raw = o
+            )
+        }
     }
 }
 
