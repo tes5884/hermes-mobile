@@ -69,6 +69,7 @@ class HermesApplication : Application(), ViewModelStoreOwner {
                         android.net.Uri.fromFile(it).toString() !in used
                 }?.forEach { it.delete() }
             }
+            runCatching { com.nousresearch.hermesmobile.ui.screens.TakePhotoFiles.clean(this) }
             com.nousresearch.hermesmobile.features.MobileFiles.clean(this)
         }, "hermes-cache-cleanup").start()
     }

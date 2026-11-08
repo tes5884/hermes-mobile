@@ -34,6 +34,10 @@
     <string name="chat_dismiss_voice">Cancel or dismiss audio</string>
     <string name="chat_more_actions">Attachments and chat actions</string>
     <string name="chat_attach">Attach files</string>
+    <string name="chat_take_photo">Take photo</string>
+    <string name="photo_use">Use photo</string>
+    <string name="photo_retake">Retake</string>
+    <string name="photo_camera_denied">Camera permission is off. Allow it in Settings to take photos.</string>
     <string name="chat_steer">Use draft to redirect current response</string>
     <string name="chat_queue_hint">Add to queue…</string>
     <string name="chat_message_hint">Message Hermes…</string>

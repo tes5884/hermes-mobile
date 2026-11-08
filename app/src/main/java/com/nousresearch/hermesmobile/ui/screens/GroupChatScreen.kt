@@ -455,6 +455,8 @@ private fun GroupRoomView(
         val picker = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
         ) { uris -> if (uris.isNotEmpty()) attachActions.onAttach(uris) }
+        val takePhoto = rememberTakePhoto { attachActions.onAttach(listOf(it)) }
+        var attachMenu by remember { mutableStateOf(false) }
         AttachmentStrip(active.composerAttachments, attachActions.onRemove)
         val context = LocalContext.current
         val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -528,8 +530,18 @@ private fun GroupRoomView(
             if (recording) {
                 RecordingBar(recordingMs ?: 0L, levels, locked, dragX, onCancel = { cancelRecording() }, onSend = { finishRecording() }, modifier = Modifier.weight(1f))
             } else {
-                FilledTonalIconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
+                Box {
+                    FilledTonalIconButton(enabled = !actionBusy, onClick = { attachMenu = true }, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
+                    }
+                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) },
+                            leadingIcon = { Icon(Icons.Default.AttachFile, null) },
+                            onClick = { attachMenu = false; picker.launch(arrayOf("*/*")) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) },
+                            leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
+                            onClick = { attachMenu = false; takePhoto() })
+                    }
                 }
                 Spacer(Modifier.width(8.dp))
                 OutlinedTextField(
