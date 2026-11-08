@@ -25,7 +25,9 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 object PushDelivery {
-    const val CHANNEL = "hermes_updates"
+    // v2: Android locks a channel's sound once created, so the bundled double tone needs a new ID.
+    const val CHANNEL = "hermes_push_v2"
+    private const val OLD_CHANNEL = "hermes_updates"
     fun configured(context: Context) = FirebaseRuntime.configured(context)
     fun permitted(context: Context) = NotificationManagerCompat.from(context).areNotificationsEnabled() &&
         (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
@@ -137,7 +139,13 @@ object PushDelivery {
         val session = event?.optString("session_id").orEmpty()
         if (session.isNotBlank() && AppPresence.isShowing(session)) return false
         val nm = context.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.push_channel), NotificationManager.IMPORTANCE_DEFAULT))
+        // Old shared channel carried the default sound; AppUpdates recreates its own when needed.
+        if (nm.getNotificationChannel(OLD_CHANNEL) != null) nm.deleteNotificationChannel(OLD_CHANNEL)
+        nm.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.push_channel), NotificationManager.IMPORTANCE_DEFAULT).apply {
+            setSound(android.net.Uri.parse("android.resource://${context.packageName}/${R.raw.hermes_tone_double}"),
+                android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+        })
         if (nm.getNotificationChannel(CHANNEL).importance == NotificationManager.IMPORTANCE_NONE) return false
         val intent = Intent(context, MainActivity::class.java).setAction("hermes.notification")
             .putExtra("event_id", eventId).setData(android.net.Uri.parse("hermes-notification:$eventId"))
