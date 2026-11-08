@@ -93,6 +93,7 @@ data class HermesUiState(
     val groupError: String? = null,
     val activeGroup: ActiveGroupRoom? = null,
     val groupActionBusy: Boolean = false,
+    val pendingVoice: List<PendingVoiceNote> = emptyList(),
     val sessions: List<HermesSession> = emptyList(),
     val sessionsHasMore: Boolean = false,
     val sessionsLoadingMore: Boolean = false,
@@ -2176,6 +2177,100 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 }
                 // Files stay in the composer on failure so the send can be retried.
                 .onFailure { uiState = uiState.copy(groupActionBusy = false, error = it.message) }
+        }
+    }
+
+    /**
+     * Voice note in a room. Room messages can't be edited, so the note stays a local pending bubble ("Transcribing…")
+     * until the gateway returns the text, then goes out as one message: transcript + audio. On failure it stays local
+     * with Retry (transcribe again) or "Send audio only" (placeholder text).
+     */
+    fun sendGroupVoiceNote(file: java.io.File, durationMs: Long) {
+        val active = uiState.activeGroup
+        if (repository == null || active == null) { file.delete(); return }
+        val note = PendingVoiceNote(UUID.randomUUID().toString(), active.room.roomId, active.replyThreadId, file.path, durationMs)
+        uiState = uiState.copy(pendingVoice = uiState.pendingVoice + note, activeGroup = active.copy(replyThreadId = null))
+        transcribeAndPost(note.id)
+    }
+
+    fun retryGroupVoice(id: String) {
+        val note = uiState.pendingVoice.firstOrNull { it.id == id && it.failed } ?: return
+        updatePendingVoice(id) { it.copy(failed = false, error = null) }
+        if (note.transcript != null) postVoice(id, note.transcript) else transcribeAndPost(id)
+    }
+
+    fun sendGroupVoiceAudioOnly(id: String) {
+        if (uiState.pendingVoice.none { it.id == id && it.failed }) return
+        updatePendingVoice(id) { it.copy(failed = false, error = null) }
+        postVoice(id, null)
+    }
+
+    fun discardGroupVoice(id: String) {
+        uiState.pendingVoice.firstOrNull { it.id == id }?.let { java.io.File(it.filePath).delete() }
+        uiState = uiState.copy(pendingVoice = uiState.pendingVoice.filterNot { it.id == id })
+    }
+
+    private fun updatePendingVoice(id: String, change: (PendingVoiceNote) -> PendingVoiceNote) {
+        uiState = uiState.copy(pendingVoice = uiState.pendingVoice.map { if (it.id == id) change(it) else it })
+    }
+
+    private fun transcribeAndPost(id: String) {
+        val repo = repository ?: return
+        val note = uiState.pendingVoice.firstOrNull { it.id == id } ?: return
+        val profile = uiState.selectedProfile
+        viewModelScope.launch {
+            val started = System.currentTimeMillis()
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) {
+                    val f = java.io.File(note.filePath)
+                    require(f.length() in 1..com.nousresearch.hermesmobile.data.VoiceNotes.MAX_BYTES) { "Recording is too large" }
+                    f.readBytes()
+                }
+                val dataUrl = "data:audio/mp4;base64," + android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                repo.rest.scopedApi(
+                    profile, "/api/audio/transcribe", "POST",
+                    JSONObject().put("data_url", dataUrl).put("mime_type", "audio/mp4"), com.nousresearch.hermesmobile.data.VoiceNotes.TRANSCRIBE_TIMEOUT_S
+                ).optString("transcript").trim().also { require(it.isNotEmpty()) { "no speech recognised" } }
+            }
+                .onSuccess {
+                    android.util.Log.i("HermesVoice", "transcribed ${note.durationMs / 1000}s note in ${System.currentTimeMillis() - started} ms")
+                    updatePendingVoice(id) { n -> n.copy(transcript = it) }
+                    postVoice(id, it)
+                }
+                .onFailure { e ->
+                    android.util.Log.w("HermesVoice", "transcribe failed after ${System.currentTimeMillis() - started} ms: ${e.message}")
+                    updatePendingVoice(id) { n -> n.copy(failed = true, error = e.message ?: "transcription failed") }
+                }
+        }
+    }
+
+    private fun postVoice(id: String, transcript: String?) {
+        val repo = repository ?: return
+        val note = uiState.pendingVoice.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) { java.io.File(note.filePath).readBytes() }
+                val name = com.nousresearch.hermesmobile.data.VoiceNotes.fileName(note.durationMs, System.currentTimeMillis())
+                repo.sendGroupMessage(
+                    note.roomId, com.nousresearch.hermesmobile.data.VoiceNotes.messageText(transcript), note.threadId,
+                    listOf(Triple(name, "audio/mp4", bytes))
+                )
+            }
+                .onSuccess { event ->
+                    java.io.File(note.filePath).delete()
+                    val current = uiState.activeGroup
+                    uiState = uiState.copy(pendingVoice = uiState.pendingVoice.filterNot { it.id == id })
+                    if (current?.room?.roomId == note.roomId) {
+                        uiState = uiState.copy(
+                            activeGroup = current.copy(
+                                events = (current.events + event).associateBy { it.seq }.values.sortedBy { it.seq },
+                                cursor = maxOf(current.cursor, event.seq),
+                                latestSeq = maxOf(current.latestSeq, event.seq)
+                            )
+                        )
+                    }
+                }
+                .onFailure { e -> updatePendingVoice(id) { n -> n.copy(failed = true, error = e.message ?: "send failed") } }
         }
     }
 

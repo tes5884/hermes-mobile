@@ -89,4 +89,16 @@
     <string name="routines_delete_title">Delete this job?</string>
     <string name="group_new_messages">New messages</string>
     <string name="group_new_chip">↓ %1$d new</string>
+    <string name="group_voice_note">Record a voice note</string>
+    <string name="group_voice_play">Play voice note</string>
+    <string name="group_voice_hold_hint">Hold to record</string>
+    <string name="group_voice_slide_cancel">Slide to cancel</string>
+    <string name="group_voice_cancel">Cancel voice note</string>
+    <string name="group_voice_transcribing">Transcribing…</string>
+    <string name="group_voice_failed">Couldn\'t transcribe</string>
+    <string name="group_voice_retry">Retry</string>
+    <string name="group_voice_audio_only">Send audio only</string>
+    <string name="group_voice_pause">Pause voice note</string>
+    <string name="group_voice_start_failed">Could not start recording</string>
+    <string name="group_voice_load_failed">Couldn\'t load audio</string>
 </resources>

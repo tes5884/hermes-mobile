@@ -194,10 +194,15 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides vm.featureRepository()?.let { r ->
                             remember(r) { com.nousresearch.hermesmobile.ui.components.ArtifactOwner(r, "", "") {} }
                         },
-                        com.nousresearch.hermesmobile.ui.screens.LocalGroupAttachmentActions provides remember(vm) {
+                        com.nousresearch.hermesmobile.ui.screens.LocalGroupAttachmentActions provides remember(vm, s.pendingVoice) {
                             com.nousresearch.hermesmobile.ui.screens.GroupAttachmentActions(
+                                pendingVoice = s.pendingVoice,
+                                onVoiceRetry = vm::retryGroupVoice,
+                                onVoiceAudioOnly = vm::sendGroupVoiceAudioOnly,
+                                onVoiceDiscard = vm::discardGroupVoice,
                                 onAttach = vm::addGroupAttachments,
                                 onRemove = vm::removeGroupAttachment,
+                                onSendVoice = vm::sendGroupVoiceNote,
                                 fetch = { eventId, att -> vm.fetchGroupAttachment(eventId, att) },
                                 onOpen = vm::openGroupAttachment
                             )

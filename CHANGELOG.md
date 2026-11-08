@@ -14,6 +14,7 @@ server plugin it needs for notifications.
 - **Attach files and photos in group chats.** The room composer has a paperclip like the 1:1 composer (up to 8 files, 25 MB in total), and attachments in a room show as inline images or tappable file cards, using the gateway's `groups.attachment.upload` and `groups.attachment.download`.
 - **Time and day dividers in group chats.** Each room message shows its time, and a divider marks the first message of each day, using the same labels as the 1:1 transcript.
 - **Group chats open where you left off.** The phone remembers the newest message you saw in each room (the gateway has no read marker for rooms). A "New messages" divider marks the first message from a bot after that point, and a "↓ N new" button jumps to the newest.
+- **Voice notes in group chats.** Hold the microphone in the room composer to record and release to send; slide left to cancel or up to lock hands-free (10 minutes at most). A live waveform shows while recording, and the note appears at once with a "Transcribing…" spinner, with Retry or Send audio only if transcription fails. The transcript is sent as the message text with the audio attached, so bots read it and people can play it.
 
 ### Changed
 
