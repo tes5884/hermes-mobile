@@ -91,6 +91,8 @@ data class HermesUiState(
     val groupRooms: List<GroupRoom> = emptyList(),
     /** Room id -> bot messages after the phone's last-seen marker (see RoomRead.listUnread). */
     val groupUnread: Map<String, Int> = emptyMap(),
+    /** Room id -> newest message (preview + time) for the rooms list, from groups.log. */
+    val groupPreviews: Map<String, com.nousresearch.hermesmobile.data.RoomPreview> = emptyMap(),
     val groupsLoading: Boolean = false,
     val groupError: String? = null,
     val activeGroup: ActiveGroupRoom? = null,
@@ -2053,9 +2055,39 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 )
                 refreshBotRoster()
                 refreshGroupUnread(repo, rooms.filter { it.active })
+                refreshGroupPreviews(repo, rooms.filter { it.active })
             }.onFailure {
                 uiState = uiState.copy(groupsLoading = false, groupError = it.message)
             }
+        }
+    }
+
+    private val previewSeqSeen = mutableMapOf<String, Long>()
+
+    /** Newest real message per room from the existing groups.log (tail window only); re-fetched only when latestSeq moves. */
+    private fun refreshGroupPreviews(repo: com.nousresearch.hermesmobile.data.HermesRepository, rooms: List<GroupRoom>) {
+        viewModelScope.launch {
+            val out = uiState.groupPreviews.toMutableMap()
+            for (room in rooms) {
+                if (previewSeqSeen[room.roomId] == room.latestSeq && out.containsKey(room.roomId)) continue
+                runCatching {
+                    var window = 40L
+                    var found: com.nousresearch.hermesmobile.data.RoomPreview? = null
+                    for (i in 0 until 3) {
+                        val page = repo.groupLog(room.roomId, (room.latestSeq - window).coerceAtLeast(0L), 200)
+                        found = com.nousresearch.hermesmobile.data.RoomPreviews.last(room, page.events)
+                        if (found != null || room.latestSeq - window <= 0L) break
+                        window *= 5
+                    }
+                    found
+                }.getOrNull()?.let { out[room.roomId] = it; previewSeqSeen[room.roomId] = room.latestSeq }
+            }
+            val ids = rooms.map { it.roomId }.toSet()
+            out.keys.retainAll(ids)
+            uiState = uiState.copy(
+                groupPreviews = out,
+                groupRooms = com.nousresearch.hermesmobile.data.RoomPreviews.sorted(uiState.groupRooms, out)
+            )
         }
     }
 

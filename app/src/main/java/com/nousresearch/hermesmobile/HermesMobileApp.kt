@@ -246,6 +246,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onApproveGroup = vm::approveGroupAction,
                         onDisbandGroup = vm::disbandGroup,
                         groupUnread = s.groupUnread,
+                        groupPreviews = s.groupPreviews,
                         botUnread = remember(s.botRoster, s.sessions) {
                             s.botRoster.filter { it.activeConnection && com.nousresearch.hermesmobile.data.botIsUnread(it.profile, s.sessions) }
                                 .map { it.profile.name }.toSet()

@@ -71,7 +71,8 @@ fun BotsScreen(
     onApproveGroup: (GroupPendingAction, String) -> Unit,
     onDisbandGroup: () -> Unit,
     groupUnread: Map<String, Int> = emptyMap(),
-    botUnread: Set<String> = emptySet()
+    botUnread: Set<String> = emptySet(),
+    groupPreviews: Map<String, RoomPreview> = emptyMap()
 ) {
     var page by remember { mutableIntStateOf(0) }
     var create by remember { mutableStateOf(false) }
@@ -152,7 +153,7 @@ fun BotsScreen(
             GroupsPanel(
                 profiles, routedBots, groupCapabilities, groupRooms, null, groupsLoading, groupActionBusy, groupError,
                 avatarAssets, onEnsureAvatar, onRefreshGroups, onCreateGroup, onOpenGroup, onCloseGroup,
-                onSendGroup, onReplyGroupThread, onRenameGroup, onStopGroup, onRetryGroup, onApproveGroup, onDisbandGroup, groupUnread
+                onSendGroup, onReplyGroupThread, onRenameGroup, onStopGroup, onRetryGroup, onApproveGroup, onDisbandGroup, groupUnread, groupPreviews
             )
         } else if (bots.isEmpty()) {
             EmptyState(Icons.Default.SmartToy, stringResource(R.string.i18n_bots_empty), stringResource(R.string.i18n_bots_empty_hint)) {

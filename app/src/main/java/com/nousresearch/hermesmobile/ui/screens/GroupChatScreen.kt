@@ -76,7 +76,8 @@ fun GroupsPanel(
     onRetry: (GroupPendingAction) -> Unit,
     onApprove: (GroupPendingAction, String) -> Unit,
     onDisband: () -> Unit,
-    unread: Map<String, Int> = emptyMap()
+    unread: Map<String, Int> = emptyMap(),
+    previews: Map<String, RoomPreview> = emptyMap()
 ) {
     if (active != null) {
         GroupRoomView(
@@ -137,7 +138,7 @@ fun GroupsPanel(
             ) { Button(onClick = { create = true }, enabled = capabilities?.driver == true && routedBots.size >= 2) { Text(stringResource(R.string.ui_7888b00075)) } }
             else -> LazyColumn(Modifier.fillMaxSize()) {
                 items(rooms, key = { it.roomId }) { room ->
-                    GroupRoomRow(room, unread[room.roomId] ?: 0, onOpen = { onOpen(room) })
+                    GroupRoomRow(room, unread[room.roomId] ?: 0, previews[room.roomId], onOpen = { onOpen(room) })
                     HorizontalDivider(
                         Modifier.padding(start = 16.dp),
                         color = MaterialTheme.colorScheme.outline.copy(alpha = .2f)
@@ -162,7 +163,7 @@ fun GroupsPanel(
 }
 
 @Composable
-private fun GroupRoomRow(room: GroupRoom, unread: Int, onOpen: () -> Unit) {
+private fun GroupRoomRow(room: GroupRoom, unread: Int, preview: RoomPreview?, onOpen: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -172,16 +173,18 @@ private fun GroupRoomRow(room: GroupRoom, unread: Int, onOpen: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(room.name, style = MaterialTheme.typography.bodyLarge, fontWeight = if (unread > 0) FontWeight.SemiBold else FontWeight.Medium)
             Text(
-                room.members.joinToString(" · ") { if (it.targetKind == "peer") "☁ @${it.handle}" else "@${it.handle}" },
+                preview?.let { RoomPreviews.text(it, stringResource(R.string.room_you_prefix)) } ?: "",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (unread > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
-        if (unread > 0) { UnreadPill(unread); Spacer(Modifier.width(8.dp)) }
-        Text("${room.members.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        IconButton(onClick = onOpen) { Icon(Icons.Default.ChevronRight, stringResource(R.string.ui_ed077f3d81)) }
+        Spacer(Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            if (preview != null) Text(relativeDate(preview.createdAt.toLong()), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (unread > 0) { Spacer(Modifier.height(4.dp)); UnreadPill(unread) }
+        }
     }
 }
 
