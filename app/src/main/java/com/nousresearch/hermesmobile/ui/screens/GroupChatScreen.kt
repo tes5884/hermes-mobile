@@ -627,14 +627,14 @@ internal fun RoomEventRow(
                         )
                         Spacer(Modifier.height(3.dp))
                     }
+                    event.attachments.forEach { RoomAttachment(event.eventId, it) }
                     if (event.text.isNotBlank()) {
                         val base = com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner.current
                         val owner = remember(base, member?.profile) { base?.let { b -> member?.profile?.takeIf { it.isNotBlank() }?.let { b.copy(profile = it) } ?: b } }
                         androidx.compose.runtime.CompositionLocalProvider(com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides owner) {
-                            com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(event.text))
+                            com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.renderCaptioned(event.text))
                         }
                     }
-                    event.attachments.forEach { RoomAttachment(event.eventId, it) }
                     Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                         if (!user && member != null) {
                             Text(

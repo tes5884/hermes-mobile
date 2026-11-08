@@ -24,6 +24,17 @@ object ChatMedia {
         return TAG.replace(text) { match -> link(match.groupValues[1]) ?: match.value }
     }
 
+    private val IMAGE_LINK = Regex("!\\[[^\\]\\n]*\\]\\(<[^>\\n]+>\\)")
+
+    /** [render] then image-first: every image link moves to the top, the caption text follows below the pictures. */
+    fun renderCaptioned(text: String): String {
+        val rendered = render(text)
+        val images = IMAGE_LINK.findAll(rendered).map { it.value }.toList()
+        if (images.isEmpty()) return rendered
+        val rest = IMAGE_LINK.replace(rendered, "").replace(Regex("[ \\t]+\\n"), "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+        return images.joinToString("\n\n") + if (rest.isEmpty()) "" else "\n\n$rest"
+    }
+
     private fun link(value: String): String? {
         val raw = value.trim()
         val quoted = raw.length >= 2 && raw.first() in "\"'`" && raw.first() == raw.last()

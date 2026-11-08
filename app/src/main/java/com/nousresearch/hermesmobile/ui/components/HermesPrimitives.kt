@@ -660,7 +660,7 @@ fun ChatMessageBubble(
                 }
             }
         } else if (message.role == "assistant") {
-            if (message.content.isNotBlank()) MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(message.content))
+            if (message.content.isNotBlank()) MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.renderCaptioned(message.content))
         }
     }
 }

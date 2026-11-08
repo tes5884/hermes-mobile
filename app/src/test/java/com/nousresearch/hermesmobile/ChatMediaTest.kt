@@ -22,4 +22,11 @@ class ChatMediaTest {
         assertEquals("MEDIA:... later", ChatMedia.render("MEDIA:... later"))
         assertEquals("no tags here", ChatMedia.render("no tags here"))
     }
+
+    @Test fun captionedPutsImagesFirst() {
+        assertEquals("![chart.png](</tmp/chart.png>)\n\nHere:", ChatMedia.renderCaptioned("Here:\nMEDIA:/tmp/chart.png\n"))
+        assertEquals("![a.png](</a.png>)\n\n![b.jpg](</b.jpg>)\n\nbefore after", ChatMedia.renderCaptioned("before MEDIA:/a.png after MEDIA:/b.jpg").replace("before  after", "before after"))
+        assertEquals("no tags here", ChatMedia.renderCaptioned("no tags here"))
+        assertEquals("![chart.png](</tmp/chart.png>)", ChatMedia.renderCaptioned("MEDIA:/tmp/chart.png"))
+    }
 }
