@@ -2130,6 +2130,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         if (generation == groupGeneration && latest?.room?.roomId == roomId) {
                             // Never let a slow poll move the monotonic cursor backwards.
                             uiState = uiState.copy(activeGroup = updated.copy(
+                                // Composer state belongs to the latest snapshot, not the one this poll started from.
+                                composerAttachments = latest.composerAttachments,
+                                replyThreadId = latest.replyThreadId,
                                 cursor = maxOf(latest.cursor, updated.cursor),
                                 latestSeq = maxOf(latest.latestSeq, updated.latestSeq),
                                 events = (latest.events + updated.events)
@@ -2145,11 +2148,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         val repo = repository ?: return
         val active = uiState.activeGroup ?: return
         val value = text.trim()
-        if (value.isBlank() || uiState.groupActionBusy) return
+        val attachments = active.composerAttachments
+        if ((value.isBlank() && attachments.isEmpty()) || uiState.groupActionBusy) return
         val threadId = active.replyThreadId
         viewModelScope.launch {
             uiState = uiState.copy(groupActionBusy = true, error = null)
-            runCatching { repo.sendGroupMessage(active.room.roomId, value, threadId) }
+            runCatching {
+                val files = attachments.map { item ->
+                    Triple(item.name, item.mimeType, withContext(Dispatchers.IO) { readAttachmentBytes(item) })
+                }
+                repo.sendGroupMessage(active.room.roomId, value, threadId, files)
+            }
                 .onSuccess { event ->
                     val current = uiState.activeGroup
                     if (current?.room?.roomId == active.room.roomId) {
@@ -2158,13 +2167,84 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                                 events = (current.events + event).associateBy { it.seq }.values.sortedBy { it.seq },
                                 cursor = maxOf(current.cursor, event.seq),
                                 latestSeq = maxOf(current.latestSeq, event.seq),
-                                replyThreadId = null
+                                replyThreadId = null,
+                                composerAttachments = current.composerAttachments.filterNot { sent -> attachments.any { it.id == sent.id } }
                             ),
                             groupActionBusy = false
                         )
                     }
                 }
+                // Files stay in the composer on failure so the send can be retried.
                 .onFailure { uiState = uiState.copy(groupActionBusy = false, error = it.message) }
+        }
+    }
+
+    fun addGroupAttachments(uris: List<Uri>) {
+        val active = uiState.activeGroup ?: return
+        val resolver = getApplication<Application>().contentResolver
+        val existing = active.composerAttachments
+        val room = (GroupAttachments.MAX_PER_MESSAGE - existing.size).coerceAtLeast(0)
+        if (room == 0) {
+            uiState = uiState.copy(snackbar = string(R.string.i18n_vm_max_attachments, GroupAttachments.MAX_PER_MESSAGE))
+            return
+        }
+        val added = uris.take(room).mapNotNull { uri ->
+            runCatching {
+                runCatching { resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                var name = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+                var size = 0L
+                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }?.let { name = cursor.getString(it) ?: name }
+                        cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }?.let { size = cursor.getLong(it) }
+                    }
+                }
+                if (size > GroupAttachments.MAX_FILE_BYTES) throw IllegalArgumentException("$name is larger than 15 MB")
+                ComposerAttachment(
+                    id = UUID.randomUUID().toString(), uri = uri.toString(), name = name,
+                    mimeType = resolver.getType(uri).orEmpty().ifBlank { "application/octet-stream" }, size = size
+                )
+            }.onFailure { uiState = uiState.copy(error = it.message) }.getOrNull()
+        }.filterNot { candidate -> existing.any { it.uri == candidate.uri } }
+        val current = uiState.activeGroup?.takeIf { it.room.roomId == active.room.roomId } ?: return
+        uiState = uiState.copy(activeGroup = current.copy(composerAttachments = (current.composerAttachments + added).take(GroupAttachments.MAX_PER_MESSAGE)))
+    }
+
+    fun removeGroupAttachment(id: String) {
+        val active = uiState.activeGroup ?: return
+        uiState = uiState.copy(activeGroup = active.copy(composerAttachments = active.composerAttachments.filterNot { it.id == id }))
+    }
+
+    private val groupFileCache = object : android.util.LruCache<String, GroupAttachmentFile>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: GroupAttachmentFile) = value.bytes.size.coerceAtLeast(1)
+    }
+
+    /** A received room file (cached, so scrolling an image back into view doesn't re-download it). */
+    suspend fun fetchGroupAttachment(eventId: String, attachment: GroupAttachment): GroupAttachmentFile {
+        val roomId = uiState.activeGroup?.room?.roomId ?: error("No open room")
+        val key = "$roomId/$eventId/${attachment.attachmentId}"
+        groupFileCache.get(key)?.let { return it }
+        val repo = repository ?: error("Not connected")
+        return repo.downloadGroupAttachment(roomId, eventId, attachment.attachmentId).also { groupFileCache.put(key, it) }
+    }
+
+    /** Tap on a file card: download, then hand it to whatever app opens that type. */
+    fun openGroupAttachment(eventId: String, attachment: GroupAttachment) {
+        viewModelScope.launch {
+            runCatching {
+                val file = fetchGroupAttachment(eventId, attachment)
+                val app = getApplication<Application>()
+                val target = withContext(Dispatchers.IO) {
+                    com.nousresearch.hermesmobile.features.MobileFiles.target(app, file.name).also { it.writeBytes(file.bytes) }
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(app, "${app.packageName}.files", target)
+                val view = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, file.mime)
+                    clipData = android.content.ClipData.newRawUri("Hermes file", uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                app.startActivity(Intent.createChooser(view, file.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { uiState = uiState.copy(error = it.message ?: "Could not open file") }
         }
     }
 

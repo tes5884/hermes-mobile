@@ -65,6 +65,8 @@ if 'interactionQueue' not in vm:
 
 # Phase-2 sessions/chat invariants.
 repo = (ROOT / 'app/src/main/java/com/nousresearch/hermesmobile/data/HermesRepository.kt').read_text()
+# groups.send now lives in GroupAttachments (it sends the upload manifests with the message).
+repo += (ROOT / 'app/src/main/java/com/nousresearch/hermesmobile/data/GroupAttachments.kt').read_text()
 resume_start = repo.find('suspend fun resumeSession')
 resume_end = repo.find('suspend fun submitPrompt', resume_start)
 resume = repo[resume_start:resume_end] if resume_start >= 0 and resume_end > resume_start else ''

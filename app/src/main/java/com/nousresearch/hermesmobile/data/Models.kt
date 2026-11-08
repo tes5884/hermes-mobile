@@ -806,6 +806,7 @@ data class GroupEvent(
     val threadId: String get() = payload.optString("thread_id")
     val memberId: String get() = payload.optString("member_id").ifBlank { actor.id }
     val visibleMessage: Boolean get() = kind == "message.user" || kind == "message.member"
+    val attachments: List<GroupAttachment> get() = GroupAttachments.fromEvent(payload)
 
     companion object {
         fun fromJson(o: JSONObject): GroupEvent = GroupEvent(
@@ -904,7 +905,8 @@ data class ActiveGroupRoom(
     val cursor: Long = 0L,
     val latestSeq: Long = 0L,
     val driver: GroupDriverStatus = GroupDriverStatus(),
-    val replyThreadId: String? = null
+    val replyThreadId: String? = null,
+    val composerAttachments: List<ComposerAttachment> = emptyList()
 )
 
 

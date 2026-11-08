@@ -188,7 +188,16 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         SystemPage(repo, s.selectedProfile, s.profiles.map { it.name }, vm::selectProfile, onMenu = openDrawer) { vm.switchSection(MainSection.SERVER_SETTINGS) }
                     } }
                     MainSection.CHAT -> ChatRoute(vm, s, openDrawer)
-                    MainSection.BOTS -> BotsScreen(
+                    MainSection.BOTS -> androidx.compose.runtime.CompositionLocalProvider(
+                        com.nousresearch.hermesmobile.ui.screens.LocalGroupAttachmentActions provides remember(vm) {
+                            com.nousresearch.hermesmobile.ui.screens.GroupAttachmentActions(
+                                onAttach = vm::addGroupAttachments,
+                                onRemove = vm::removeGroupAttachment,
+                                fetch = { eventId, att -> vm.fetchGroupAttachment(eventId, att) },
+                                onOpen = vm::openGroupAttachment
+                            )
+                        }
+                    ) { BotsScreen(
                         onMenu = openDrawer,
                         profiles = s.profiles,
                         routedBots = s.botRoster,
@@ -224,7 +233,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onRetryGroup = vm::retryGroupAction,
                         onApproveGroup = vm::approveGroupAction,
                         onDisbandGroup = vm::disbandGroup
-                    )
+                    ) }
                     MainSection.KANBAN -> KanbanScreen(
                         onMenu = openDrawer,
                         available = s.kanbanAvailable,

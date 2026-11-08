@@ -225,7 +225,7 @@ private fun ModelPill(chat: ActiveChat, enabled: Boolean, onClick: () -> Unit, m
 }
 
 @Composable
-private fun AttachmentStrip(items: List<ComposerAttachment>, onRemove: (String) -> Unit) {
+internal fun AttachmentStrip(items: List<ComposerAttachment>, onRemove: (String) -> Unit) {
     if (items.isEmpty()) return
     LazyRow(
         Modifier.fillMaxWidth().padding(vertical = 4.dp),

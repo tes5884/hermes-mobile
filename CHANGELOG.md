@@ -9,6 +9,10 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Added
+
+- **Attach files and photos in group chats.** The room composer has a paperclip like the 1:1 composer (up to 8 files, 25 MB in total), and attachments in a room show as inline images or tappable file cards, using the gateway's `groups.attachment.upload` and `groups.attachment.download`.
+
 ### Fixed
 
 - **Group chats open at the newest message.** A room now uses a reversed list like the 1:1 transcript: it opens at the latest message, stays pinned there as new ones arrive, and does not move a reader who scrolled up.
