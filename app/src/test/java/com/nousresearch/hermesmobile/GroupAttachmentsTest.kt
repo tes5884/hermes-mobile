@@ -72,7 +72,7 @@ class GroupAttachmentsTest {
     }
 
     @Test fun voiceMarkerOnlyOnVoiceSends() {
-        assertTrue(GroupAttachments.sendPayload("hi", "t", emptyList(), voice = true).optBoolean("voice"))
+        assertFalse(GroupAttachments.sendPayload("hi", "t", emptyList(), voice = true).has("voice"))
         assertFalse(GroupAttachments.sendPayload("hi", "t", emptyList()).has("voice"))
     }
 }

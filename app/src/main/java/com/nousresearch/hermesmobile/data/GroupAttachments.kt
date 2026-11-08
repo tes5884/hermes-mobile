@@ -70,7 +70,8 @@ object GroupAttachments {
 
     fun sendPayload(text: String, threadId: String, attachments: List<GroupAttachment>, voice: Boolean = false): JSONObject {
         val payload = JSONObject().put("text", text).put("thread_id", threadId)
-        if (voice) payload.put("voice", true)
+        // The server's room.send schema rejects unknown fields ("unknown field: voice"), so the voice flag stays
+        // client-side only; it must not go on the wire.
         if (attachments.isNotEmpty()) payload.put("attachments", JSONArray().also { a -> attachments.forEach { a.put(it.toManifest()) } })
         return payload
     }
