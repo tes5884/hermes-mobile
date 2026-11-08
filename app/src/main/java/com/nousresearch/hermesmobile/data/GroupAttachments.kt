@@ -99,8 +99,8 @@ object GroupAttachments {
         threadId: String,
         eventId: String,
         files: List<Triple<String, String, ByteArray>>,
-        newUploadId: () -> String,
-        voice: Boolean = false
+        voice: Boolean = false,
+        newUploadId: () -> String
     ): JSONObject {
         require(files.size <= MAX_PER_MESSAGE) { "At most $MAX_PER_MESSAGE files per message" }
         require(files.sumOf { it.third.size.toLong() } <= MAX_MESSAGE_BYTES) { "Files total more than 25 MB" }
