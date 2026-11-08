@@ -1061,19 +1061,26 @@ class HermesRepository(
         )
     }
 
-    suspend fun sendGroupMessage(roomId: String, text: String, threadId: String? = null): GroupEvent {
+    suspend fun sendGroupMessage(
+        roomId: String,
+        text: String,
+        threadId: String? = null,
+        files: List<Triple<String, String, ByteArray>> = emptyList()
+    ): GroupEvent {
         val actualThread = threadId?.takeIf { it.isNotBlank() } ?: "t-${UUID.randomUUID()}"
         val clientEventId = "mobile-${UUID.randomUUID()}"
-        val result = gateway.requestObject(
-            "groups.send",
-            JSONObject()
-                .put("room_id", roomId)
-                .put("event_id", clientEventId)
-                .put("payload", JSONObject().put("text", text).put("thread_id", actualThread)),
-            timeoutMs = 30_000
+        val result = GroupAttachments.sendWithAttachments(
+            request = { method, params -> gateway.requestObject(method, params, timeoutMs = if (files.isEmpty()) 30_000 else 120_000) },
+            roomId = roomId, text = text, threadId = actualThread, eventId = clientEventId, files = files,
+            newUploadId = { UUID.randomUUID().toString() }
         )
         return GroupEvent.fromJson(result.optJSONObject("event") ?: error("Hermes returned no room event"))
     }
+
+    suspend fun downloadGroupAttachment(roomId: String, eventId: String, attachmentId: String): GroupAttachmentFile =
+        GroupAttachments.parseDownload(
+            gateway.requestObject("groups.attachment.download", GroupAttachments.downloadParams(roomId, eventId, attachmentId), timeoutMs = 120_000)
+        )
 
     suspend fun renameGroup(roomId: String, name: String): GroupRoom {
         val result = gateway.requestObject(

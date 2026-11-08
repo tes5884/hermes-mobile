@@ -7,6 +7,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +32,16 @@ import com.nousresearch.hermesmobile.ui.components.HermesTopBar
 import com.nousresearch.hermesmobile.ui.components.DashedDivider
 import com.nousresearch.hermesmobile.ui.components.ProfileAvatar
 import com.nousresearch.hermesmobile.ui.theme.hermes
+
+/** Attach/download hooks for the open room, provided once at the app root so the panel signatures stay put. */
+class GroupAttachmentActions(
+    val onAttach: (List<android.net.Uri>) -> Unit = {},
+    val onRemove: (String) -> Unit = {},
+    val fetch: suspend (String, GroupAttachment) -> GroupAttachmentFile = { _, _ -> error("unavailable") },
+    val onOpen: (String, GroupAttachment) -> Unit = { _, _ -> }
+)
+
+val LocalGroupAttachmentActions = androidx.compose.runtime.staticCompositionLocalOf { GroupAttachmentActions() }
 
 @Composable
 fun GroupsPanel(
@@ -346,10 +359,18 @@ private fun GroupRoomView(
                 IconButton(onClick = { onReplyThread(null) }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Close, stringResource(R.string.i18n_grp_cancel_thread), Modifier.size(16.dp)) }
             }
         }
+        val attachActions = LocalGroupAttachmentActions.current
+        val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+        ) { uris -> if (uris.isNotEmpty()) attachActions.onAttach(uris) }
+        AttachmentStrip(active.composerAttachments, attachActions.onRemove)
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
         ) {
+            IconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }) {
+                Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
+            }
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -361,7 +382,7 @@ private fun GroupRoomView(
             )
             Spacer(Modifier.width(8.dp))
             FilledIconButton(
-                enabled = input.trim().isNotBlank() && !actionBusy,
+                enabled = (input.trim().isNotBlank() || active.composerAttachments.isNotEmpty()) && !actionBusy,
                 onClick = { val value = input.trim(); input = ""; onSend(value) }
             ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
         }
@@ -412,7 +433,8 @@ private fun RoomEventRow(
                         )
                         Spacer(Modifier.height(3.dp))
                     }
-                    com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(event.text))
+                    if (event.text.isNotBlank()) com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.render(event.text))
+                    event.attachments.forEach { RoomAttachment(event.eventId, it) }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (event.threadId.isNotBlank()) {
                             TextButton(onClick = onReplyThread, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(stringResource(R.string.ui_a236732715), style = MaterialTheme.typography.labelSmall) }
@@ -485,4 +507,70 @@ private fun roomEventStatusText(event: GroupEvent, context: android.content.Cont
 private fun appendMention(text: String, handle: String): String {
     val prefix = text.trimEnd()
     return if (prefix.isBlank()) "@$handle " else "$prefix @$handle "
+}
+
+
+@Composable
+private fun RoomAttachment(eventId: String, attachment: GroupAttachment) {
+    val actions = LocalGroupAttachmentActions.current
+    if (attachment.kind == "image") {
+        val state = produceState<Result<android.graphics.Bitmap>?>(null, eventId, attachment.attachmentId) {
+            value = runCatching {
+                val file = actions.fetch(eventId, attachment)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { decodeScaled(file.bytes) }
+                    ?: error("Not a readable image")
+            }
+        }
+        val result = state.value
+        val bitmap = result?.getOrNull()
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = attachment.name,
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                modifier = Modifier.padding(top = 4.dp).fillMaxWidth().heightIn(max = 320.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { actions.onOpen(eventId, attachment) }
+            )
+            return
+        }
+        if (result == null) {
+            Box(Modifier.padding(top = 4.dp).fillMaxWidth().height(72.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            }
+            return
+        }
+        // Failed to load: fall through to a tappable card so the file is still reachable.
+    }
+    OutlinedCard(
+        onClick = { actions.onOpen(eventId, attachment) },
+        modifier = Modifier.padding(top = 4.dp).fillMaxWidth()
+    ) {
+        Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                when (attachment.kind) { "image" -> Icons.Default.Image; "pdf" -> Icons.Default.PictureAsPdf; else -> Icons.Default.AttachFile },
+                null, Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                if (attachment.size > 0) Text(formatAttachmentSize(attachment.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(Icons.Default.Download, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+private fun formatAttachmentSize(bytes: Long): String = when {
+    bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "${bytes / 1_000} KB"
+    else -> "$bytes B"
+}
+
+private fun decodeScaled(bytes: ByteArray, maxEdge: Int = 1280): android.graphics.Bitmap? {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= maxEdge || bounds.outHeight / (sample * 2) >= maxEdge) sample *= 2
+    return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
 }

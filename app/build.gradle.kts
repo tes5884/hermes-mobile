@@ -13,7 +13,7 @@ android {
         applicationId = providers.gradleProperty("hermes.applicationId").orElse("io.github.adrianlaborda.hermesmobile").get()
         minSdk = 26
         targetSdk = 36
-        versionCode = 50
+        versionCode = 51
         versionName = "0.3.0-beta.15"
 
         // Where the app looks for its own updates (GitHub releases); forks set theirs, or "" to turn it off.
