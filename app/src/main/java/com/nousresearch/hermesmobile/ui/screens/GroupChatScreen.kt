@@ -8,6 +8,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.background
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.gestures.scrollBy
@@ -307,6 +309,13 @@ private fun GroupRoomView(
         val own = RoomRead.newestOwnSeq(visibleEvents)
         if (own > seenSeq) { seenSeq = own; RoomRead.save(readPrefs, roomKey, own) }
     }
+    // Sending (text or voice) snaps to the newest row and keeps it there for a moment while the message lays out.
+    var pinTick by remember(roomKey) { mutableIntStateOf(0) }
+    var pinActive by remember(roomKey) { mutableStateOf(false) }
+    LaunchedEffect(pinTick) {
+        if (pinTick > 0) { pinActive = true; listState.scrollToItem(0); kotlinx.coroutines.delay(2500); pinActive = false }
+    }
+    LaunchedEffect(reversedRows.size) { if (pinActive) listState.scrollToItem(0) }
     val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
     val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
 
@@ -374,12 +383,13 @@ private fun GroupRoomView(
                 Text(stringResource(R.string.ui_ea79140946), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
+            val awayFromBottom by remember(listState) { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 } }
             Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
                 reverseLayout = true,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = if (awayFromBottom) 52.dp else 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(reversedRows, key = { it.key }) { row ->
@@ -398,7 +408,6 @@ private fun GroupRoomView(
                     }
                 }
             }
-            val awayFromBottom = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
             if (awayFromBottom) {
                 val chipScope = rememberCoroutineScope()
                 Surface(
@@ -446,7 +455,7 @@ private fun GroupRoomView(
         }
         fun finishRecording() {
             recordingMs = null
-            recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms) }
+            recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms); pinTick++ }
         }
         val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
@@ -471,11 +480,12 @@ private fun GroupRoomView(
         } else {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Bottom
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }) {
+            FilledTonalIconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
             }
+            Spacer(Modifier.width(8.dp))
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -483,12 +493,13 @@ private fun GroupRoomView(
                 minLines = 1,
                 maxLines = 4,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-                placeholder = { Text(stringResource(R.string.ui_5413c3c10b)) }
+                placeholder = { Text(stringResource(R.string.group_composer_hint), maxLines = 1, overflow = TextOverflow.Ellipsis) }
             )
             Spacer(Modifier.width(8.dp))
             if (input.isBlank() && active.composerAttachments.isEmpty()) {
                 FilledIconButton(
                     enabled = !actionBusy,
+                    modifier = Modifier.size(44.dp),
                     onClick = {
                         if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) startRecording()
                         else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
@@ -497,7 +508,8 @@ private fun GroupRoomView(
             } else {
                 FilledIconButton(
                     enabled = !actionBusy,
-                    onClick = { val value = input.trim(); input = ""; onSend(value) }
+                    modifier = Modifier.size(44.dp),
+                    onClick = { val value = input.trim(); input = ""; onSend(value); pinTick++ }
                 ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
             }
         }
@@ -525,8 +537,9 @@ private fun GroupRoomView(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun RoomEventRow(
+internal fun RoomEventRow(
     event: GroupEvent,
     member: GroupMember?,
     onReplyThread: () -> Unit,
@@ -534,25 +547,28 @@ private fun RoomEventRow(
 ) {
     if (event.visibleMessage) {
         val user = event.kind == "message.user"
+        val maxBubble = (LocalConfiguration.current.screenWidthDp * 0.8f).dp
+        val shape = androidx.compose.foundation.shape.RoundedCornerShape(
+            topStart = 18.dp, topEnd = 18.dp,
+            bottomEnd = if (user) 4.dp else 18.dp, bottomStart = if (user) 18.dp else 4.dp
+        )
+        val canThread = !user && event.threadId.isNotBlank()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
             Surface(
                 color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.fillMaxWidth(if (user) .86f else .94f)
+                shape = shape,
+                modifier = Modifier.widthIn(max = maxBubble).clip(shape)
+                    .then(if (canThread) Modifier.combinedClickable(onClick = {}, onLongClick = onReplyThread) else Modifier)
             ) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     val timeText = RoomRows.millis(event)?.let { android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date(it)) }
                     if (!user) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                member?.let { "@${it.handle} · ${it.label}" } ?: event.actor.displayName.ifBlank { event.actor.id },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (timeText != null) Text(timeText, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                        Text(
+                            member?.let { "@${it.handle} · ${it.label}" } ?: event.actor.displayName.ifBlank { event.actor.id },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
                         Spacer(Modifier.height(3.dp))
                     }
                     if (event.text.isNotBlank()) {
@@ -563,14 +579,16 @@ private fun RoomEventRow(
                         }
                     }
                     event.attachments.forEach { RoomAttachment(event.eventId, it) }
-                    if (user && timeText != null) Text(timeText, Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.End, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (event.threadId.isNotBlank()) {
-                            TextButton(onClick = onReplyThread, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(stringResource(R.string.ui_a236732715), style = MaterialTheme.typography.labelSmall) }
-                        }
+                    Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                         if (!user && member != null) {
-                            TextButton(onClick = { onReplyTo(member.handle) }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text(stringResource(R.string.i18n_grp_reply_to, member.handle), style = MaterialTheme.typography.labelSmall) }
+                            Text(
+                                "↩ " + stringResource(R.string.group_reply_short),
+                                Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp)).clickable { onReplyTo(member.handle) }.padding(horizontal = 4.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(10.dp))
                         }
+                        if (timeText != null) Text(timeText, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -620,7 +638,9 @@ private fun PendingRoomActionCard(
 }
 
 private fun shouldRenderRoomEvent(event: GroupEvent): Boolean = when (event.kind) {
-    "message.user", "message.member", "turn.failed", "turn.cancelled", "turn.deferred", "room.activity", "room.stop_requested" -> true
+    "message.user", "message.member", "turn.failed", "turn.cancelled", "turn.deferred", "room.stop_requested" -> true
+    // Only the success "Room settled" line is dropped; any other room status stays.
+    "room.activity" -> !event.payload.optString("status").equals("settled", true)
     else -> false
 }
 
@@ -628,7 +648,7 @@ private fun roomEventStatusText(event: GroupEvent, context: android.content.Cont
     "turn.failed" -> context.getString(R.string.i18n_grp_turn_failed, event.payload.optString("error").ifBlank { context.getString(R.string.i18n_unknown_error) })
     "turn.cancelled" -> context.getString(R.string.i18n_grp_turn_cancelled, event.payload.optString("reason")).trimEnd(':', ' ')
     "turn.deferred" -> context.getString(R.string.i18n_grp_turn_deferred, event.payload.optString("reason")).trimEnd(':', ' ')
-    "room.activity" -> event.payload.optString("status").takeIf { it.isNotBlank() }?.let { context.getString(R.string.i18n_grp_room_status, it) }
+    "room.activity" -> event.payload.optString("status").takeIf { it.isNotBlank() && !it.equals("settled", true) }?.let { context.getString(R.string.i18n_grp_room_status, it) }
     "room.stop_requested" -> context.getString(R.string.i18n_grp_stop_requested)
     else -> null
 }

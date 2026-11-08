@@ -371,4 +371,6 @@
     <string name="i18n_edit_restore_title">Restore to this checkpoint?</string>
     <string name="i18n_edit_restore_body">Everything after this prompt is removed from the conversation, and the prompt runs again from here.</string>
     <string name="i18n_edit_restore_confirm">Restore &amp; rerun</string>
+    <string name="group_composer_hint">Message the room</string>
+    <string name="group_reply_short">Reply</string>
 </resources>
