@@ -244,19 +244,13 @@ private fun GroupRoomView(
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var disband by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+    // Reverse-layout list like the 1:1 transcript: index 0 is the newest row, so the room opens at the
+    // latest message, stays pinned there as events arrive, and never moves a reader who scrolled up.
+    val listState = remember(active.room.roomId) { androidx.compose.foundation.lazy.LazyListState() }
     val visibleEvents = remember(active.events) { active.events.filter { shouldRenderRoomEvent(it) } }
+    val reversedEvents = remember(visibleEvents) { visibleEvents.asReversed() }
     val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
     val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
-
-    LaunchedEffect(visibleEvents.lastOrNull()?.seq) {
-        if (visibleEvents.isNotEmpty()) {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: Int.MAX_VALUE
-            if (lastVisible >= visibleEvents.lastIndex - 2 || listState.layoutInfo.totalItemsCount == 0) {
-                listState.scrollToItem(visibleEvents.lastIndex)
-            }
-        }
-    }
 
     // An open room is a view inside Bots: back closes it, it doesn't leave the page.
     androidx.activity.compose.BackHandler(onBack = onBack)
@@ -324,11 +318,12 @@ private fun GroupRoomView(
         } else {
             LazyColumn(
                 state = listState,
+                reverseLayout = true,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(visibleEvents, key = { it.seq }) { event ->
+                items(reversedEvents, key = { it.seq }) { event ->
                     RoomEventRow(
                         event = event,
                         member = membersById[event.memberId],

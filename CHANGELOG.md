@@ -9,6 +9,10 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Group chats open at the newest message.** A room now uses a reversed list like the 1:1 transcript: it opens at the latest message, stays pinned there as new ones arrive, and does not move a reader who scrolled up.
+
 ## [0.3.0-beta.15] - 2026-10-31
 
 ### Added
