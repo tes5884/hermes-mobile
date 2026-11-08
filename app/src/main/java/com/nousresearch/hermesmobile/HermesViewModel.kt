@@ -2522,12 +2522,24 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             repeat(60) {
                 if (uiState.activeConnectionId != connection) return@launch
                 if (uiState.connectionState == GatewayConnectionState.CONNECTED && uiState.profiles.any { it.name == profile }) {
+                    // Room notices (plugin "room-push") carry session_id "room:<room id>": open that group chat.
+                    if (sid != null && sid.startsWith("room:")) { openRoomNotification(sid.removePrefix("room:")); return@launch }
                     if (sid != null) openSession(HermesSession(id = sid, profile = profile, title = "Hermes"))
                     else { selectProfile(profile); notificationInboxRequested = true }
                     return@launch
                 }
                 kotlinx.coroutines.delay(500)
             }
+        }
+    }
+
+    private fun openRoomNotification(roomId: String) {
+        val repo = repository ?: return
+        switchSection(MainSection.BOTS)
+        viewModelScope.launch {
+            val room = uiState.groupRooms.firstOrNull { it.roomId == roomId }
+                ?: runCatching { repo.groupRooms() }.getOrNull()?.firstOrNull { it.roomId == roomId }
+            if (room != null) openGroup(room)
         }
     }
 

@@ -37,7 +37,8 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
         val openDrawer: () -> Unit = { scope.launch { drawerState.open() } }
         LaunchedEffect(vm.notificationInboxRequested) { if (vm.notificationInboxRequested) { vm.switchSection(MainSection.NOTIFICATIONS); vm.notificationInboxRequested = false } }
         // Lets the push service skip a turn notice for the chat the user is reading right now.
-        val openChat = if (s.section == MainSection.CHAT) s.activeChat?.storedSessionId else null
+        val openChat = if (s.section == MainSection.CHAT) s.activeChat?.storedSessionId
+            else if (s.section == MainSection.BOTS) s.activeGroup?.room?.roomId?.let { "room:$it" } else null
         DisposableEffect(openChat) {
             com.nousresearch.hermesmobile.push.AppPresence.openSessionId = openChat
             onDispose { com.nousresearch.hermesmobile.push.AppPresence.openSessionId = null }
