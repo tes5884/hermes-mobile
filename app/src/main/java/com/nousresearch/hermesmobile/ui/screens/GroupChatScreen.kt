@@ -43,6 +43,10 @@ class GroupAttachmentActions(
     val onAttach: (List<android.net.Uri>) -> Unit = {},
     val onRemove: (String) -> Unit = {},
     val onSendVoice: (java.io.File, Long) -> Unit = { f, _ -> f.delete() },
+    val pendingVoice: List<PendingVoiceNote> = emptyList(),
+    val onVoiceRetry: (String) -> Unit = {},
+    val onVoiceAudioOnly: (String) -> Unit = {},
+    val onVoiceDiscard: (String) -> Unit = {},
     val fetch: suspend (String, GroupAttachment) -> GroupAttachmentFile = { _, _ -> error("unavailable") },
     val onOpen: (String, GroupAttachment) -> Unit = { _, _ -> }
 )
@@ -323,6 +327,7 @@ private fun GroupRoomView(
 
     // An open room is a view inside Bots: back closes it, it doesn't leave the page.
     androidx.activity.compose.BackHandler(onBack = onBack)
+    val attachActions0 = LocalGroupAttachmentActions.current
     Column(Modifier.fillMaxSize().imePadding()) {
         HermesTopBar(
             active.room.name,
@@ -380,7 +385,8 @@ private fun GroupRoomView(
             Spacer(Modifier.height(6.dp))
         }
 
-        if (visibleEvents.isEmpty()) {
+        val pendingNotes = attachActions0.pendingVoice.filter { it.roomId == active.room.roomId }
+        if (visibleEvents.isEmpty() && pendingNotes.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(stringResource(R.string.ui_ea79140946), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -394,6 +400,10 @@ private fun GroupRoomView(
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = if (awayFromBottom) 52.dp else 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // Reversed list: index 0 is the newest, so his pending notes sit at the very bottom.
+                items(pendingNotes.asReversed(), key = { "p:" + it.id }) { note ->
+                    PendingVoiceBubble(note, { attachActions0.onVoiceRetry(note.id) }, { attachActions0.onVoiceAudioOnly(note.id) }, { attachActions0.onVoiceDiscard(note.id) })
+                }
                 items(reversedRows, key = { it.key }) { row ->
                     when (row) {
                         is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
@@ -447,74 +457,106 @@ private fun GroupRoomView(
         ) { uris -> if (uris.isNotEmpty()) attachActions.onAttach(uris) }
         AttachmentStrip(active.composerAttachments, attachActions.onRemove)
         val context = LocalContext.current
+        val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
         var recorderLimit by remember { mutableStateOf(false) }
         val recorder = remember(active.room.roomId) { com.nousresearch.hermesmobile.features.VoiceNoteRecorder(context) { recorderLimit = true } }
         var recordingMs by remember { mutableStateOf<Long?>(null) }
+        var locked by remember { mutableStateOf(false) }
+        var dragX by remember { mutableFloatStateOf(0f) }
+        var levels by remember { mutableStateOf<List<Float>>(emptyList()) }
         var micError by remember { mutableStateOf<String?>(null) }
-        fun startRecording() {
+        var tooltip by remember { mutableStateOf(false) }
+        val tick: () -> Unit = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress) }
+        fun resetRecording() { recordingMs = null; locked = false; dragX = 0f; levels = emptyList() }
+        fun beginRecording(): Boolean {
             micError = null
-            runCatching { recorder.start(); recordingMs = 0L }.onFailure { micError = it.message ?: "Could not start recording" }
+            val ok = runCatching { recorder.start(); recordingMs = 0L; levels = emptyList(); locked = false; dragX = 0f }
+                .onFailure { micError = it.message ?: "Could not start recording" }.isSuccess
+            if (ok) tick()
+            return ok
         }
         fun finishRecording() {
-            recordingMs = null
+            resetRecording()
             recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms); pinTick++ }
         }
+        fun cancelRecording() { recorder.cancel(); resetRecording() }
         val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-        ) { granted -> if (granted) startRecording() else micError = context.getString(R.string.a22_voice_permission) }
+        ) { granted -> if (!granted) micError = context.getString(R.string.a22_voice_permission) } // allowed: he holds again
+        fun hasMic() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
         LaunchedEffect(recordingMs != null) {
-            while (recordingMs != null) { recordingMs = recorder.elapsedMs(); kotlinx.coroutines.delay(250) }
+            while (recordingMs != null) {
+                recordingMs = recorder.elapsedMs()
+                levels = VoiceNotes.pushLevel(levels, VoiceNotes.level(recorder.amplitude()))
+                kotlinx.coroutines.delay(50)
+            }
         }
         LaunchedEffect(recorderLimit) { if (recorderLimit) { recorderLimit = false; if (recorder.active) finishRecording() } }
+        LaunchedEffect(tooltip) { if (tooltip) { kotlinx.coroutines.delay(2000); tooltip = false } }
         DisposableEffect(recorder) { onDispose { recorder.cancel() } }
         micError?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
 
-        if (recordingMs != null) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { recorder.cancel(); recordingMs = null }) { Text(stringResource(R.string.ui_19766ed6cc)) }
-                Spacer(Modifier.weight(1f))
-                Box(Modifier.size(10.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MaterialTheme.colorScheme.error))
-                Spacer(Modifier.width(8.dp))
-                Text(VoiceNotes.clock(((recordingMs ?: 0L) / 1000).toInt()), style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                FilledIconButton(onClick = { finishRecording() }) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
-            }
-        } else {
+        val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
+        val micCallbacks = remember(recorder) {
+            HoldMicCallbacks(
+                onPress = { if (hasMic()) beginRecording() else { micPermission.launch(android.Manifest.permission.RECORD_AUDIO); false } },
+                onDrag = { dx, _ -> dragX = dx },
+                onLock = { locked = true; dragX = 0f; tick() },
+                onRelease = { heldMs, cancelled ->
+                    when {
+                        !recorder.active -> {}                       // the 10 min cap already sent it
+                        cancelled -> { cancelRecording(); tick() }
+                        VoiceNotes.tooShort(heldMs) -> { cancelRecording(); tooltip = true }
+                        else -> finishRecording()
+                    }
+                },
+                onTalkBackToggle = {
+                    when {
+                        recorder.active -> finishRecording()
+                        hasMic() -> { if (beginRecording()) locked = true }
+                        else -> micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
+                    }
+                }
+            )
+        }
+        val recording = recordingMs != null
+        val showMic = input.isBlank() && active.composerAttachments.isEmpty()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            FilledTonalIconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
-            }
-            Spacer(Modifier.width(8.dp))
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
-                minLines = 1,
-                maxLines = 4,
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-                placeholder = { Text(stringResource(R.string.group_composer_hint), maxLines = 1, overflow = TextOverflow.Ellipsis) }
-            )
-            Spacer(Modifier.width(8.dp))
-            if (input.isBlank() && active.composerAttachments.isEmpty()) {
-                FilledIconButton(
-                    enabled = !actionBusy,
-                    modifier = Modifier.size(44.dp),
-                    onClick = {
-                        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) startRecording()
-                        else micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
-                    }
-                ) { Icon(Icons.Default.Mic, stringResource(R.string.group_voice_note)) }
+            if (recording) {
+                RecordingBar(recordingMs ?: 0L, levels, locked, dragX, onCancel = { cancelRecording() }, onSend = { finishRecording() }, modifier = Modifier.weight(1f))
             } else {
-                FilledIconButton(
-                    enabled = !actionBusy,
-                    modifier = Modifier.size(44.dp),
-                    onClick = { val value = input.trim(); input = ""; onSend(value); pinTick++ }
-                ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
+                FilledTonalIconButton(enabled = !actionBusy, onClick = { picker.launch(arrayOf("*/*")) }, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
+                }
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    modifier = Modifier.weight(1f),
+                    minLines = 1,
+                    maxLines = 4,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+                    placeholder = { Text(stringResource(R.string.group_composer_hint), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
             }
-        }
+            if (!(recording && locked)) {
+                Spacer(Modifier.width(8.dp))
+                if (showMic || recording) {
+                    HoldMicButton(
+                        enabled = true, recording = recording, cancelWidthPx = cancelWidthPx, callbacks = micCallbacks,
+                        tooltip = tooltip, showLockHint = recording && !locked
+                    )
+                } else {
+                    FilledIconButton(
+                        enabled = !actionBusy,
+                        modifier = Modifier.size(44.dp),
+                        onClick = { val value = input.trim(); input = ""; onSend(value); pinTick++ }
+                    ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
+                }
+            }
         }
     }
 

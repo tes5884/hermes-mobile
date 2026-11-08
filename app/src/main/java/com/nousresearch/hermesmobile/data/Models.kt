@@ -930,6 +930,18 @@ data class ActiveGroupRoom(
 
 
 
+/** A voice note that is recorded but not yet in the room: shown as a local bubble while it transcribes (room messages can't be edited, so it is only sent once the text is known). */
+data class PendingVoiceNote(
+    val id: String,
+    val roomId: String,
+    val threadId: String?,
+    val filePath: String,
+    val durationMs: Long,
+    val transcript: String? = null,
+    val failed: Boolean = false,
+    val error: String? = null
+)
+
 data class ComposerAttachment(
     val id: String,
     val uri: String,

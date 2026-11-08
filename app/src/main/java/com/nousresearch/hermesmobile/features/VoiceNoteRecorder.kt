@@ -5,13 +5,16 @@ import android.media.MediaRecorder
 import com.nousresearch.hermesmobile.data.VoiceNotes
 import java.io.File
 
-/** Records one voice note (m4a, 16 kHz AAC, <= 8 MB) for a room. Not thread-safe; drive it from the UI thread. */
+/** Records one voice note (m4a, 16 kHz mono AAC at 32 kbps, <= 10 min) for a room. Not thread-safe; drive it from the UI thread. */
 class VoiceNoteRecorder(private val context: Context, private val onLimit: () -> Unit) {
     private var recorder: MediaRecorder? = null
     private var file: File? = null
     private var startedAt = 0L
     val active: Boolean get() = recorder != null
     fun elapsedMs(): Long = if (recorder == null) 0 else System.currentTimeMillis() - startedAt
+
+    /** Peak amplitude since the last call (0..32767), for the live waveform. */
+    fun amplitude(): Int = runCatching { recorder?.maxAmplitude ?: 0 }.getOrDefault(0)
 
     fun start() {
         if (recorder != null) return
@@ -22,7 +25,7 @@ class VoiceNoteRecorder(private val context: Context, private val onLimit: () ->
             r.setAudioSource(MediaRecorder.AudioSource.MIC)
             r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            r.setAudioSamplingRate(16000); r.setAudioEncodingBitRate(64000)
+            r.setAudioChannels(1); r.setAudioSamplingRate(VoiceNotes.SAMPLE_RATE); r.setAudioEncodingBitRate(VoiceNotes.BITRATE)
             r.setMaxDuration(VoiceNotes.MAX_MS.toInt()); r.setMaxFileSize(VoiceNotes.MAX_BYTES)
             r.setOutputFile(f.path)
             r.setOnInfoListener { _, what, _ ->
