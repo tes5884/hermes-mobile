@@ -925,7 +925,9 @@ data class ActiveGroupRoom(
     val latestSeq: Long = 0L,
     val driver: GroupDriverStatus = GroupDriverStatus(),
     val replyThreadId: String? = null,
-    val composerAttachments: List<ComposerAttachment> = emptyList()
+    val composerAttachments: List<ComposerAttachment> = emptyList(),
+    /** Opening a room never waits on the server: it shows saved messages and this says where the sync stands. */
+    val link: RoomLink = RoomLink.CONNECTING
 )
 
 

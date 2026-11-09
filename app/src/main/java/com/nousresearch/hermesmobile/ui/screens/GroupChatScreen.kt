@@ -361,6 +361,14 @@ private fun GroupRoomView(
             }
         )
         DashedDivider(color = MaterialTheme.hermes.line)
+        if (active.link != com.nousresearch.hermesmobile.data.RoomLink.LIVE) {
+            Text(
+                stringResource(if (active.link == com.nousresearch.hermesmobile.data.RoomLink.OFFLINE) R.string.room_link_offline else R.string.room_link_connecting),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
 
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 7.dp),
@@ -527,6 +535,7 @@ private fun GroupRoomView(
         }
         val recording = recordingMs != null
         val showMic = input.isBlank() && active.composerAttachments.isEmpty()
+        val live = active.link == com.nousresearch.hermesmobile.data.RoomLink.LIVE
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -535,7 +544,7 @@ private fun GroupRoomView(
                 RecordingBar(recordingMs ?: 0L, levels, locked, dragX, onCancel = { cancelRecording() }, onSend = { finishRecording() }, modifier = Modifier.weight(1f))
             } else {
                 Box {
-                    FilledTonalIconButton(enabled = !actionBusy, onClick = { attachMenu = true }, modifier = Modifier.size(44.dp)) {
+                    FilledTonalIconButton(enabled = !actionBusy && live, onClick = { attachMenu = true }, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
                     }
                     DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
@@ -562,12 +571,12 @@ private fun GroupRoomView(
                 Spacer(Modifier.width(8.dp))
                 if (showMic || recording) {
                     HoldMicButton(
-                        enabled = true, recording = recording, cancelWidthPx = cancelWidthPx, callbacks = micCallbacks,
+                        enabled = live || recording, recording = recording, cancelWidthPx = cancelWidthPx, callbacks = micCallbacks,
                         tooltip = tooltip, showLockHint = recording && !locked
                     )
                 } else {
                     FilledIconButton(
-                        enabled = !actionBusy,
+                        enabled = !actionBusy && live,
                         modifier = Modifier.size(44.dp),
                         onClick = { val value = input.trim(); input = ""; onSend(value); pinTick++ }
                     ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }

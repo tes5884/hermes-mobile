@@ -373,4 +373,6 @@
     <string name="i18n_edit_restore_confirm">Restaurar y volver a ejecutar</string>
     <string name="group_composer_hint">Escribe en la sala</string>
     <string name="group_reply_short">Responder</string>
+    <string name="room_link_connecting">Conectando…</string>
+    <string name="room_link_offline">Sin conexión, mostrando mensajes guardados</string>
 </resources>

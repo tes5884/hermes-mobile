@@ -373,4 +373,6 @@
     <string name="i18n_edit_restore_confirm">Restore &amp; rerun</string>
     <string name="group_composer_hint">Message the room</string>
     <string name="group_reply_short">Reply</string>
+    <string name="room_link_connecting">Connecting…</string>
+    <string name="room_link_offline">Offline, showing saved messages</string>
 </resources>

@@ -237,6 +237,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         private set
 
     init {
+        // The Groups list shows saved rows at once; the network refresh only replaces them.
+        roomCache()?.loadList()?.let { saved ->
+            uiState = uiState.copy(
+                groupRooms = com.nousresearch.hermesmobile.data.RoomPreviews.sorted(saved.rooms.filter { it.active }, saved.previews),
+                groupPreviews = saved.previews
+            )
+        }
         initialStoreSnapshot.active?.let { cfg ->
             if (cfg.baseUrl.isNotBlank() && cfg.hasCredential) connect(cfg, silent = true)
         }
@@ -618,7 +625,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         uiState = uiState.copy(savedConfig = null, activeConnectionId = null, connectionDiscovery = null)
     }
 
+    private fun roomCache(): com.nousresearch.hermesmobile.data.RoomCache? =
+        (uiState.activeConnectionId ?: uiState.savedConfig?.id)?.let {
+            com.nousresearch.hermesmobile.data.RoomCache(java.io.File(getApplication<android.app.Application>().filesDir, "room_cache"), it)
+        }
+
     fun signOutActive() {
+        roomCache()?.clear()
         uiState.activeConnectionId?.let { removePushConnection(it) }
         requireReauthentication(null)
     }
@@ -2054,6 +2067,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     groupError = null
                 )
                 refreshBotRoster()
+                roomCache()?.saveList(uiState.groupRooms, uiState.groupPreviews)
                 refreshGroupUnread(repo, rooms.filter { it.active })
                 refreshGroupPreviews(repo, rooms.filter { it.active })
             }.onFailure {
@@ -2088,6 +2102,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 groupPreviews = out,
                 groupRooms = com.nousresearch.hermesmobile.data.RoomPreviews.sorted(uiState.groupRooms, out)
             )
+            roomCache()?.saveList(uiState.groupRooms, out)
         }
     }
 
@@ -2149,22 +2164,27 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    /**
+     * A tap always opens the room at once: saved messages (if any) are shown, and the sync with the gateway runs
+     * behind them. Nothing here waits on the network, and a missing connection is a status line, not a dead tap.
+     */
     fun openGroup(room: GroupRoom) {
-        val repo = repository ?: return
         val generation = ++groupGeneration
         groupPollingJob?.cancel()
-        viewModelScope.launch {
-            uiState = uiState.copy(groupsLoading = true, groupError = null)
-            runCatching { repo.openGroupRoom(room) }
-                .onSuccess { active ->
-                    if (generation != groupGeneration) return@onSuccess
-                    uiState = uiState.copy(activeGroup = active, groupsLoading = false, groupActionBusy = false)
-                    startGroupPolling(active.room.roomId, generation)
-                }
-                .onFailure {
-                    if (generation == groupGeneration) uiState = uiState.copy(groupsLoading = false, groupError = it.message)
-                }
-        }
+        val cached = roomCache()?.loadRoom(room.roomId)
+        val cachedMax = cached?.events?.maxOfOrNull { it.seq }
+        // Forward-only replay: reuse the saved tail only when what's missing fits in a few pages; otherwise start from the live tail.
+        val usable = cached != null && cachedMax != null && room.latestSeq - cachedMax <= GROUP_CACHE_MAX_GAP
+        val events = if (usable) cached!!.events else emptyList()
+        val cursor = if (usable) cachedMax!! else (room.latestSeq - GROUP_TAIL_WINDOW).coerceAtLeast(0L)
+        uiState = uiState.copy(
+            activeGroup = ActiveGroupRoom(
+                room = room, events = events, cursor = cursor, latestSeq = maxOf(room.latestSeq, cachedMax ?: 0L),
+                link = if (repository == null || !networkOnline) RoomLink.OFFLINE else RoomLink.CONNECTING
+            ),
+            groupsLoading = false, groupError = null, groupActionBusy = false
+        )
+        startGroupPolling(room.roomId, generation, immediate = true)
     }
 
     fun closeGroup() {
@@ -2175,33 +2195,48 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         refreshGroups()
     }
 
-    private fun startGroupPolling(roomId: String, generation: Long) {
-        val repo = repository ?: return
+    private fun startGroupPolling(roomId: String, generation: Long, immediate: Boolean = false) {
         groupPollingJob?.cancel()
         groupPollingJob = viewModelScope.launch {
-            while (appForeground && networkOnline && generation == groupGeneration && uiState.activeGroup?.room?.roomId == roomId) {
+            var first = immediate
+            while (appForeground && generation == groupGeneration && uiState.activeGroup?.room?.roomId == roomId) {
                 val current = uiState.activeGroup ?: break
-                val delayMs = if (current.driver.working || current.driver.pendingActions.isNotEmpty()) 900L else 2_500L
-                delay(delayMs)
+                if (!first) {
+                    val delayMs = if (current.driver.working || current.driver.pendingActions.isNotEmpty()) 900L else 2_500L
+                    delay(delayMs)
+                }
+                first = false
                 if (generation != groupGeneration || uiState.activeGroup?.room?.roomId != roomId) break
+                val repo = repository
+                if (repo == null || !networkOnline) { setGroupLink(roomId, generation, RoomLink.OFFLINE); continue }
                 runCatching { repo.pollGroupRoom(current) }
                     .onSuccess { updated ->
                         val latest = uiState.activeGroup
                         if (generation == groupGeneration && latest?.room?.roomId == roomId) {
                             // Never let a slow poll move the monotonic cursor backwards.
+                            val merged = com.nousresearch.hermesmobile.data.RoomCache.merge(latest.events, updated.events, Int.MAX_VALUE).takeLast(1200)
                             uiState = uiState.copy(activeGroup = updated.copy(
                                 // Composer state belongs to the latest snapshot, not the one this poll started from.
                                 composerAttachments = latest.composerAttachments,
                                 replyThreadId = latest.replyThreadId,
                                 cursor = maxOf(latest.cursor, updated.cursor),
                                 latestSeq = maxOf(latest.latestSeq, updated.latestSeq),
-                                events = (latest.events + updated.events)
-                                    .associateBy { it.seq }.values.sortedBy { it.seq }.takeLast(1200)
+                                events = merged,
+                                link = RoomLink.LIVE
                             ))
+                            if (merged.lastOrNull()?.seq != latest.events.lastOrNull()?.seq || latest.link != RoomLink.LIVE) {
+                                roomCache()?.saveRoom(updated.room, merged)
+                            }
                         }
                     }
+                    .onFailure { setGroupLink(roomId, generation, RoomLink.OFFLINE) }
             }
         }
+    }
+
+    private fun setGroupLink(roomId: String, generation: Long, link: RoomLink) {
+        val a = uiState.activeGroup ?: return
+        if (generation == groupGeneration && a.room.roomId == roomId && a.link != link) uiState = uiState.copy(activeGroup = a.copy(link = link))
     }
 
     fun sendGroupMessage(text: String) {
@@ -4479,6 +4514,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     companion object {
+        /** Opening a room: live tail window, and the most a saved tail may lag before it is dropped (4 pages x 500 on the first sync). */
+        private const val GROUP_TAIL_WINDOW = 400L
+        private const val GROUP_CACHE_MAX_GAP = 1_500L
         private const val LIVE_SESSIONS_POLL_MS = 4_000L
         /** The gateway's refusal of `session.resume` for a Kanban worker's transcript (tui_gateway `_resume_guard`). */
         private const val KANBAN_RESUME_REFUSED = 4132
