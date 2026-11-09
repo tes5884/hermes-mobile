@@ -2679,7 +2679,11 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     // Room notices (plugin "room-push") carry session_id "room:<room id>": open that group chat.
                     if (sid != null && sid.startsWith("room:")) { openRoomNotification(sid.removePrefix("room:")); return@launch }
                     if (sid != null) openSession(HermesSession(id = sid, profile = profile, title = "Hermes"))
-                    else { selectProfile(profile); notificationInboxRequested = true }
+                    else {
+                        // No chat named (cron deliveries): that bot's canonical Bot Chat, never the notifications page.
+                        val bot = uiState.profiles.firstOrNull { it.name == profile }
+                        if (bot != null) openBot(bot) else selectProfile(profile)
+                    }
                     return@launch
                 }
                 kotlinx.coroutines.delay(500)

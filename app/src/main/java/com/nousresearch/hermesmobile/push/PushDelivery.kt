@@ -107,8 +107,8 @@ object PushDelivery {
     /** Title and text for an event fetched from the inbox, localizing the plugin's generic notices. */
     fun presentation(context: Context, event: JSONObject): Pair<String, String> {
         val type = event.optString("event_type")
-        val title = event.optString("title").ifBlank { "Hermes" }
-        val rawBody = event.optString("body")
+        val title = CronWrapper.title(event.optString("title").ifBlank { "Hermes" }, event.optString("profile"))
+        val rawBody = CronWrapper.strip(event.optString("body"))
         // A file notice shows its caption (or the file's name), never the server path.
         val files = PushMedia.paths(rawBody)
         val body = if (files.isEmpty()) rawBody else PushMedia.text(rawBody).ifBlank { PushMedia.name(files.first()) }
@@ -194,6 +194,8 @@ object PushDelivery {
             withdraw(context, id)
             return false
         }
+        // The profile is known from the account; the inbox event may not carry it (tap routing and the title use it).
+        event.put("profile", account.profile)
         PushStore(context).received(account, event)
         // A turn started elsewhere (Desktop, the CLI…) stays in the inbox without ringing: whoever started it is there.
         if (event.optString("event_type") in setOf("turn_completed", "turn_failed") &&
@@ -274,4 +276,13 @@ object AppPresence {
     @Volatile var foreground: Boolean = false
     @Volatile var openSessionId: String? = null
     fun isShowing(sessionId: String): Boolean = foreground && openSessionId == sessionId
+}
+
+/** No-agent cron deliveries arrive as "Hermes reminder" with a "Cronjob Response: <job> (job_id: …)" header line. */
+object CronWrapper {
+    private val header = Regex("""^\s*Cronjob Response:[^\n]*\(job_id:[^\n]*\)[ \t]*(\r?\n)*""")
+    fun strip(body: String): String = header.replaceFirst(body, "")
+    /** The generic reminder title becomes the bot's name; any other title is kept. */
+    fun title(title: String, profile: String): String =
+        if (title == "Hermes reminder" && profile.isNotBlank()) profile.replaceFirstChar { it.uppercase() } else title
 }

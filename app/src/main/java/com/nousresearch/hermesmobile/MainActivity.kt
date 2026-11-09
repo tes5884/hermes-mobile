@@ -35,7 +35,7 @@ class MainActivity : ComponentActivity() {
         val id = intent?.getStringExtra("event_id") ?: return
         val event = runCatching { com.nousresearch.hermesmobile.push.PushStore(this).events().firstOrNull { it.optString("event_id") == id } }.getOrNull()
         if (event != null) vm.openNotification(event)
-        else { vm.notificationInboxRequested = true; com.nousresearch.hermesmobile.push.PushDelivery.schedule(this, id) }
+        else { com.nousresearch.hermesmobile.push.PushDelivery.schedule(this, id) }
     }
     override fun onStart() { super.onStart(); (application as HermesApplication).screenStarted(); com.nousresearch.hermesmobile.push.PushDelivery.schedule(this); com.nousresearch.hermesmobile.update.AppUpdates.onAppStarted(this) }
     override fun onStop() { (application as HermesApplication).screenStopped(); super.onStop() }
