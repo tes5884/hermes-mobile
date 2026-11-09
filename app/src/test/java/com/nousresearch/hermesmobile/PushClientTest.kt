@@ -22,4 +22,16 @@ class PushClientTest {
         assertThrows(IllegalArgumentException::class.java) { PushClient.endpoint("http://hermes.example.com:8642", "default") }
         assertThrows(IllegalArgumentException::class.java) { PushClient.endpoint("http://user:pw@192.168.1.2:8642", "default") }
     }
+
+    @Test
+    fun fetchRetriesThenSucceedsOrGivesUp() {
+        var n = 0
+        val ok = com.nousresearch.hermesmobile.push.PushDelivery.fetchWithRetry(3, 0) { if (++n < 3) error("cold vpn") else "event" }
+        assertEquals("event", ok)
+        assertEquals(3, n)
+        n = 0
+        val none = com.nousresearch.hermesmobile.push.PushDelivery.fetchWithRetry<String>(3, 0) { n++; error("down") }
+        assertEquals(null, none)
+        assertEquals(3, n)
+    }
 }

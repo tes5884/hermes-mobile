@@ -25,6 +25,15 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 object PushDelivery {
+    /** Runs [block] up to [attempts] times, pausing [pauseMs] between failures; null if all fail. */
+    fun <T> fetchWithRetry(attempts: Int = 3, pauseMs: Long = 600, block: () -> T): T? {
+        repeat(attempts) { i ->
+            runCatching { block() }.getOrNull()?.let { return it }
+            if (i < attempts - 1) Thread.sleep(pauseMs)
+        }
+        return null
+    }
+
     // v2: Android locks a channel's sound once created, so the bundled double tone needs a new ID.
     const val CHANNEL = "hermes_push_v2"
     private const val OLD_CHANNEL = "hermes_updates"
@@ -227,7 +236,8 @@ class HermesMessagingService : FirebaseMessagingService() {
         val validConnections = GatewayConfigStore(this).snapshot().connections.map { it.id }.toSet()
         val account = runCatching { PushStore(this).accounts().firstOrNull { it.device == device && it.connection in validConnections } }.getOrNull() ?: return
         // FCM only carried the ID: fetch the content from the user's server now (briefly; it may need a VPN).
-        val event = runCatching { PushClient.call(account, "event.get", JSONObject().put("event_id", id), fast = true) }.getOrNull()
+        // Retry up to 3 times (~15 s total) so a cold/dozing VPN still yields real text on the first notification.
+        val event = PushDelivery.fetchWithRetry { PushClient.call(account, "event.get", JSONObject().put("event_id", id), fast = true) }
         if (event != null) {
             if (PushDelivery.handle(this, account, event)) runCatching { PushClient.call(account, "event.ack", JSONObject().put("event_id", id), fast = true) }
             return
