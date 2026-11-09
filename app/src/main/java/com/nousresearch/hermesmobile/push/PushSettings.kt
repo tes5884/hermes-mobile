@@ -58,7 +58,7 @@ fun PushSettings(
     onOpen: (JSONObject) -> Unit,
     onAskHermes: (profile: String, prompt: String) -> Unit,
     runCommand: suspend (profile: String, name: String, arg: String) -> String,
-    downloadFile: suspend (profile: String, path: String, output: java.io.File) -> String
+    downloadFile: suspend (profile: String, path: String, output: java.io.File, onProgress: (Long, Long) -> Unit) -> String
 ) {
     // Each Hermes profile pairs separately; switching here does not change the app's selected profile.
     var profile by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(initialProfile) }
@@ -604,34 +604,37 @@ const val PLUGIN_REPO_URL = "https://github.com/adrianlaborda/hermes-android-plu
 
 /** One tappable card per file a notice carries (`MEDIA:` lines): downloads it from the server, then opens it. */
 @Composable
-internal fun PushFiles(event: JSONObject, downloadFile: suspend (profile: String, path: String, output: java.io.File) -> String) {
+internal fun PushFiles(event: JSONObject, downloadFile: suspend (profile: String, path: String, output: java.io.File, onProgress: (Long, Long) -> Unit) -> String) {
     val paths = remember(event) { PushMedia.paths(event.optString("body")) }
     if (paths.isEmpty()) return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var busy by remember(event) { mutableStateOf<String?>(null) }
+    var progress by remember(event) { mutableStateOf(-1f) }
     var failure by remember(event) { mutableStateOf<String?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         paths.forEach { path ->
             val name = PushMedia.name(path)
             OutlinedCard(onClick = {
                 if (busy != null) return@OutlinedCard
-                busy = path; failure = null
+                busy = path; failure = null; progress = -1f
                 scope.launch {
-                    val file = com.nousresearch.hermesmobile.features.MobileFiles.target(context, path)
                     try {
-                        val mime = withContext(Dispatchers.IO) { downloadFile(event.optString("profile"), path, file) }
-                        com.nousresearch.hermesmobile.features.MobileFiles.share(
-                            context, com.nousresearch.hermesmobile.features.ExportedFile(file, mime, name), open = true)
-                    } catch (e: CancellationException) { file.delete(); throw e }
-                    catch (e: Exception) { file.delete(); failure = e.message ?: e.javaClass.simpleName }
-                    finally { busy = null }
+                        failure = PushFileOpener.fetchAndOpen(context, path,
+                            download = { p, out, prog -> downloadFile(event.optString("profile"), p, out, prog) },
+                            onProgress = { progress = it })
+                    } finally { busy = null }
                 }
             }, modifier = Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-                    if (busy == path) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Text(stringResource(R.string.push_open_file), color = MaterialTheme.colorScheme.primary)
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                        if (busy == path) {
+                            if (progress in 0f..1f) Text("${(progress * 100).toInt()}%", color = MaterialTheme.colorScheme.primary)
+                            else CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else Text(stringResource(if (failure != null) R.string.push_retry_file else R.string.push_open_file), color = MaterialTheme.colorScheme.primary)
+                    }
+                    if (busy == path && progress in 0f..1f) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
                 }
             }
         }

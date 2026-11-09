@@ -16,6 +16,7 @@
     <string name="push_empty">Todavía no hay notificaciones</string>
     <string name="push_open_chat">Abrir conversación</string>
     <string name="push_open_file">Abrir</string>
+    <string name="push_retry_file">Reintentar</string>
     <string name="copy_code">Copiar código</string>
     <string name="preview">Vista previa</string>
     <string name="page_previous">Página anterior</string>

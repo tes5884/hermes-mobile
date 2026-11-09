@@ -2620,9 +2620,30 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun askHermes(prompt: String, profile: String = mainProfile()) = newWorkspaceChat(profile, "", null, draft = prompt)
 
     /** Downloads a server file named by a push notice (`MEDIA:` path) the way chat replies fetch theirs; returns its MIME type. */
-    suspend fun downloadPushFile(profile: String, path: String, output: java.io.File): String {
+    suspend fun downloadPushFile(profile: String, path: String, output: java.io.File, onProgress: (Long, Long) -> Unit = { _, _ -> }): String {
         val repo = repository ?: throw IllegalStateException(string(R.string.a23_not_connected))
-        return repo.rest.downloadFile(profile, path, null, output)
+        return repo.rest.downloadFile(profile, path, null, output, onProgress = onProgress)
+    }
+
+    /** Tapping a file notice: fetch the file(s) and open them (installer for an APK), with Toasts for start / failure. */
+    private fun openPushFiles(event: JSONObject, paths: List<String>) {
+        val app = getApplication<Application>()
+        val profile = event.optString("profile")
+        fun toast(text: String) = android.widget.Toast.makeText(app, text, android.widget.Toast.LENGTH_LONG).show()
+        viewModelScope.launch {
+            for (path in paths.take(3)) {
+                val name = com.nousresearch.hermesmobile.push.PushMedia.name(path)
+                toast("Downloading $name…")
+                var shown = -1
+                val err = com.nousresearch.hermesmobile.push.PushFileOpener.fetchAndOpen(app, path,
+                    download = { p, out, prog -> downloadPushFile(profile, p, out, prog) },
+                    onProgress = { f ->
+                        val pct = if (f >= 0) (f * 100).toInt() / 25 * 25 else -1
+                        if (pct > 0 && pct != shown && pct < 100) { shown = pct; viewModelScope.launch { toast("$name $pct%") } }
+                    })
+                if (err != null) toast(err)
+            }
+        }
     }
 
     /**
@@ -2702,6 +2723,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     var notificationInboxRequested by mutableStateOf(false)
 
     fun openNotification(event: JSONObject) {
+        val files = com.nousresearch.hermesmobile.push.PushMedia.paths(event.optString("body"))
+        // A notice that carries a file opens the file; the Notifications inbox keeps its card as the retry.
+        if (files.isNotEmpty()) { openPushFiles(event, files); return }
         val connection = event.optString("connection")
         val profile = event.optString("profile")
         val sid = event.optString("session_id").takeUnless { it.isBlank() || it == "null" }

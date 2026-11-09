@@ -789,7 +789,7 @@ class HermesRestClient(
     }
 
     /** Bounded, streaming download; no tokens in URLs/intents, no redirects to other origins. */
-    suspend fun downloadFile(profile: String, path: String, sessionId: String?, output: java.io.File, managed: Boolean = false, maxBytes: Long = 64L * 1024 * 1024): String {
+    suspend fun downloadFile(profile: String, path: String, sessionId: String?, output: java.io.File, managed: Boolean = false, maxBytes: Long = 64L * 1024 * 1024, onProgress: ((Long, Long) -> Unit)? = null): String {
         val route = (if (managed) "/api/files/download" else "/api/fs/download") + "?path=${enc(path)}&profile=${enc(profile)}" +
             (sessionId?.let { "&session_id=${enc(it)}" } ?: "")
         ensureFreshNativeToken()
@@ -804,6 +804,8 @@ class HermesRestClient(
                         response.body.byteStream().use { source -> output.outputStream().use { sink ->
                             val buffer = ByteArray(32 * 1024)
                             var total = 0L
+                            val expected = response.body.contentLength()
+                            var lastReport = 0L
                             while (true) {
                                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                                 val n = source.read(buffer)
@@ -811,7 +813,9 @@ class HermesRestClient(
                                 total += n
                                 require(total <= maxBytes) { "Mobile preview/download size limit exceeded" }
                                 sink.write(buffer, 0, n)
+                                if (onProgress != null && total - lastReport >= 128 * 1024) { lastReport = total; onProgress(total, expected) }
                             }
+                            onProgress?.invoke(total, expected)
                         } }
                         response.header("Content-Type")?.substringBefore(';') ?: "application/octet-stream"
                     }
