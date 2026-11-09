@@ -941,7 +941,9 @@ data class PendingVoiceNote(
     val durationMs: Long,
     val transcript: String? = null,
     val failed: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    /** Set for a note recorded in a 1:1 chat (then roomId is "chat:<stored session id>"); null for a room note. */
+    val profile: String? = null
 )
 
 data class ComposerAttachment(

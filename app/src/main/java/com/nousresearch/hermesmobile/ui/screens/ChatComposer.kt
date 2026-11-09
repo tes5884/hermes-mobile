@@ -34,10 +34,99 @@ import androidx.compose.ui.unit.sp
 import com.nousresearch.hermesmobile.R
 import com.nousresearch.hermesmobile.data.*
 import com.nousresearch.hermesmobile.features.VoiceActions
+import com.nousresearch.hermesmobile.data.VoiceNotes
 import com.nousresearch.hermesmobile.ui.components.*
 import com.nousresearch.hermesmobile.ui.theme.HermesMono
 import com.nousresearch.hermesmobile.ui.theme.contextPressure
 import com.nousresearch.hermesmobile.ui.theme.hermes
+
+/** Hold-to-record voice notes for the open 1:1 chat, provided at the app root so the chat signatures stay put. */
+class ChatVoiceNoteActions(
+    val onSendVoice: (java.io.File, Long) -> Unit = { f, _ -> f.delete() },
+    val pendingVoice: List<PendingVoiceNote> = emptyList(),
+    val onVoiceRetry: (String) -> Unit = {},
+    val onVoiceAudioOnly: (String) -> Unit = {},
+    val onVoiceDiscard: (String) -> Unit = {}
+)
+
+val LocalChatVoiceNoteActions = staticCompositionLocalOf<ChatVoiceNoteActions?> { null }
+
+/** Recorder state for the hold-to-record mic: the same gesture, waveform and limits as rooms. */
+@Stable
+internal class VoiceNoteRig(
+    val recorder: com.nousresearch.hermesmobile.features.VoiceNoteRecorder,
+    val callbacks: HoldMicCallbacks
+) {
+    var recordingMs by mutableStateOf<Long?>(null)
+    var locked by mutableStateOf(false)
+    var dragX by mutableFloatStateOf(0f)
+    var levels by mutableStateOf<List<Float>>(emptyList())
+    var micError by mutableStateOf<String?>(null)
+    var tooltip by mutableStateOf(false)
+    val recording: Boolean get() = recordingMs != null
+    var finishRecording: () -> Unit = {}
+    var cancelRecording: () -> Unit = {}
+}
+
+@Composable
+internal fun rememberVoiceNoteRig(key: Any, onSend: (java.io.File, Long) -> Unit): VoiceNoteRig {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val sendNow by rememberUpdatedState(onSend)
+    var limit by remember(key) { mutableStateOf(false) }
+    val recorder = remember(key) { com.nousresearch.hermesmobile.features.VoiceNoteRecorder(context) { limit = true } }
+    val holder = remember(key) { arrayOfNulls<VoiceNoteRig>(1) }
+    val tick: () -> Unit = { haptic.performHapticFeedback(HapticFeedbackType.LongPress) }
+    val permissionMsg = stringResource(R.string.a22_voice_permission)
+    fun hasMic() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) holder[0]?.micError = permissionMsg
+    }
+    val rig = remember(recorder) {
+        fun reset() { holder[0]?.let { it.recordingMs = null; it.locked = false; it.dragX = 0f; it.levels = emptyList() } }
+        fun begin(): Boolean {
+            val r = holder[0] ?: return false
+            r.micError = null
+            val ok = runCatching { recorder.start(); r.recordingMs = 0L; r.levels = emptyList(); r.locked = false; r.dragX = 0f }
+                .onFailure { r.micError = it.message ?: "Could not start recording" }.isSuccess
+            if (ok) tick()
+            return ok
+        }
+        fun finish() { reset(); recorder.stop()?.let { (f, ms) -> sendNow(f, ms) } }
+        fun cancel() { recorder.cancel(); reset() }
+        VoiceNoteRig(recorder, HoldMicCallbacks(
+            onPress = { if (hasMic()) begin() else { permission.launch(android.Manifest.permission.RECORD_AUDIO); false } },
+            onDrag = { dx, _ -> holder[0]?.dragX = dx },
+            onLock = { holder[0]?.let { it.locked = true; it.dragX = 0f }; tick() },
+            onRelease = { heldMs, cancelled ->
+                when {
+                    !recorder.active -> {}
+                    cancelled -> { cancel(); tick() }
+                    VoiceNotes.tooShort(heldMs) -> { cancel(); holder[0]?.tooltip = true }
+                    else -> finish()
+                }
+            },
+            onTalkBackToggle = {
+                when {
+                    recorder.active -> finish()
+                    hasMic() -> { if (begin()) holder[0]?.locked = true }
+                    else -> permission.launch(android.Manifest.permission.RECORD_AUDIO)
+                }
+            }
+        )).also { holder[0] = it; it.finishRecording = ::finish; it.cancelRecording = ::cancel }
+    }
+    LaunchedEffect(rig.recording) {
+        while (rig.recordingMs != null) {
+            rig.recordingMs = recorder.elapsedMs()
+            rig.levels = VoiceNotes.pushLevel(rig.levels, VoiceNotes.level(recorder.amplitude()))
+            kotlinx.coroutines.delay(50)
+        }
+    }
+    LaunchedEffect(limit) { if (limit) { limit = false; if (recorder.active) rig.finishRecording() } }
+    LaunchedEffect(rig.tooltip) { if (rig.tooltip) { kotlinx.coroutines.delay(2000); rig.tooltip = false } }
+    DisposableEffect(recorder) { onDispose { recorder.cancel() } }
+    return rig
+}
 
 /**
  * Desktop-style composer card: input on top, a control row underneath with
@@ -63,6 +152,10 @@ internal fun ChatComposer(
     var composerMenu by remember(chat.storedSessionId, chat.profile) { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val hasMessage = draft.isNotBlank() || attachments.isNotEmpty()
+    val voiceNotes = LocalChatVoiceNoteActions.current
+    val rig = rememberVoiceNoteRig(ChatConversationIdentity.from(chat)) { f, ms -> voiceNotes?.onSendVoice?.invoke(f, ms) ?: f.delete() }
+    val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    val holdMic = voiceNotes != null && !chat.readOnly
     Surface(
         modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
         shape = RoundedCornerShape(24.dp),
@@ -93,8 +186,9 @@ internal fun ChatComposer(
                     }
                 }
             }
-            AttachmentStrip(attachments, onRemoveAttachment)
-            TextField(
+            rig.micError?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+            if (!rig.recording) AttachmentStrip(attachments, onRemoveAttachment)
+            if (!rig.recording) TextField(
                 value = draft,
                 onValueChange = onDraftChange,
                 modifier = Modifier.fillMaxWidth(),
@@ -115,7 +209,8 @@ internal fun ChatComposer(
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Default)
             )
             Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box {
+                if (rig.recording) RecordingBar(rig.recordingMs ?: 0L, rig.levels, rig.locked, rig.dragX, onCancel = rig.cancelRecording, onSend = rig.finishRecording, modifier = Modifier.weight(1f))
+                else Box {
                     IconButton(onClick = { composerMenu = true }) { Icon(Icons.Default.Add, stringResource(R.string.chat_more_actions)) }
                     DropdownMenu(expanded = composerMenu, onDismissRequest = { composerMenu = false }) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) },
@@ -146,9 +241,9 @@ internal fun ChatComposer(
                             onClick = { composerMenu = false; onSteer(draft); onDraftChange("") })
                     }
                 }
-                Box(Modifier.weight(1f)) { ModelPill(chat, enabled = !chat.running, onClick = onModel) }
-                ComposerContextRing(sessionUsage, onContext)
-                if (chat.running) {
+                if (!rig.recording) Box(Modifier.weight(1f)) { ModelPill(chat, enabled = !chat.running, onClick = onModel) }
+                if (!rig.recording) ComposerContextRing(sessionUsage, onContext)
+                if (chat.running && !rig.recording) {
                     IconButton(onClick = { haptics.performHapticFeedback(HapticFeedbackType.Reject); onStop() }) {
                         Icon(Icons.Default.StopCircle, stringResource(R.string.chat_stop), tint = MaterialTheme.colorScheme.error)
                     }
@@ -157,6 +252,11 @@ internal fun ChatComposer(
                     voice?.recording == true -> FilledIconButton(onClick = voice.dictate) {
                         Icon(Icons.Default.Stop, stringResource(R.string.chat_finish_dictation))
                     }
+                    // One call site for both states, so the press that started the recording keeps its gesture.
+                    rig.recording || (!hasMessage && holdMic) -> if (!(rig.recording && rig.locked)) HoldMicButton(
+                        enabled = true, recording = rig.recording, cancelWidthPx = cancelWidthPx, callbacks = rig.callbacks,
+                        tooltip = rig.tooltip, showLockHint = rig.recording && !rig.locked
+                    )
                     !hasMessage && voice != null && !chat.running -> IconButton(
                         enabled = !voice.busy && !voice.speaking,
                         onClick = voice.dictate

@@ -2288,6 +2288,38 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         transcribeAndPost(note.id)
     }
 
+    /** Voice note in a 1:1 chat: same pending bubble as rooms, then transcript text + the audio as a normal attachment. */
+    fun sendChatVoiceNote(file: java.io.File, durationMs: Long) {
+        val chat = uiState.activeChat
+        if (repository == null || chat == null || chat.readOnly) { file.delete(); return }
+        val note = PendingVoiceNote(UUID.randomUUID().toString(), "chat:${chat.storedSessionId}", null, file.path, durationMs, profile = chat.profile)
+        uiState = uiState.copy(pendingVoice = uiState.pendingVoice + note)
+        transcribeAndPost(note.id)
+    }
+
+    private fun postChatVoice(id: String, transcript: String?) {
+        val note = uiState.pendingVoice.firstOrNull { it.id == id } ?: return
+        val chat = uiState.activeChat
+        if (chat == null || chat.readOnly || "chat:${chat.storedSessionId}" != note.roomId || chat.profile != note.profile) {
+            updatePendingVoice(id) { it.copy(failed = true, error = "Open the chat to send this note") }
+            return
+        }
+        val file = java.io.File(note.filePath)
+        if (!file.exists()) { updatePendingVoice(id) { it.copy(failed = true, error = "Recording is gone") }; return }
+        val attachment = ComposerAttachment(
+            id = UUID.randomUUID().toString(), uri = Uri.fromFile(file).toString(),
+            name = com.nousresearch.hermesmobile.data.VoiceNotes.fileName(note.durationMs, System.currentTimeMillis()),
+            mimeType = "audio/mp4", size = file.length()
+        )
+        val text = com.nousresearch.hermesmobile.data.VoiceNotes.messageText(transcript)
+        // The file stays in the cache dir: the upload reads it after this hand-off.
+        uiState = uiState.copy(pendingVoice = uiState.pendingVoice.filterNot { it.id == id })
+        if (chat.running) {
+            uiState = uiState.copy(queuedPrompts = uiState.queuedPrompts + QueuedPrompt(UUID.randomUUID().toString(), text, listOf(attachment)))
+            persistComposerSoon(immediate = true)
+        } else submitPromptNow(chat, text, listOf(attachment))
+    }
+
     fun retryGroupVoice(id: String) {
         val note = uiState.pendingVoice.firstOrNull { it.id == id && it.failed } ?: return
         updatePendingVoice(id) { it.copy(failed = false, error = null) }
@@ -2312,7 +2344,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun transcribeAndPost(id: String) {
         val repo = repository ?: return
         val note = uiState.pendingVoice.firstOrNull { it.id == id } ?: return
-        val profile = uiState.selectedProfile
+        val profile = note.profile ?: uiState.selectedProfile
         viewModelScope.launch {
             val started = System.currentTimeMillis()
             runCatching {
@@ -2342,6 +2374,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun postVoice(id: String, transcript: String?) {
         val repo = repository ?: return
         val note = uiState.pendingVoice.firstOrNull { it.id == id } ?: return
+        if (note.profile != null) { postChatVoice(id, transcript); return }
         viewModelScope.launch {
             runCatching {
                 val bytes = withContext(Dispatchers.IO) { java.io.File(note.filePath).readBytes() }

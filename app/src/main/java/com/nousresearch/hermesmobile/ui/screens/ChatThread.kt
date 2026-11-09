@@ -289,6 +289,12 @@ internal fun ChatThread(
                                     onMove = actions.onMoveQueued,
                                     onClear = actions.onClearQueue
                                 )
+                                val noteActions = LocalChatVoiceNoteActions.current
+                                if (noteActions != null) noteActions.pendingVoice.filter { it.roomId == "chat:${chat.storedSessionId}" }.forEach { note ->
+                                    key(note.id) {
+                                        PendingVoiceBubble(note, { noteActions.onVoiceRetry(note.id) }, { noteActions.onVoiceAudioOnly(note.id) }, { noteActions.onVoiceDiscard(note.id) })
+                                    }
+                                }
                             }
                             ChatListEntry.Older -> Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
                                 if (loadingOlderMessages) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)

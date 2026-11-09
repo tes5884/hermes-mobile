@@ -542,7 +542,15 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
     val artifactOwner = remember(repo, chat?.profile, chat?.storedSessionId) {
         if (repo != null && chat != null) com.nousresearch.hermesmobile.ui.components.ArtifactOwner(repo, chat.profile, chat.storedSessionId) { artifact = it } else null
     }
-    androidx.compose.runtime.CompositionLocalProvider(com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides artifactOwner) {
+    androidx.compose.runtime.CompositionLocalProvider(
+        com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides artifactOwner,
+        com.nousresearch.hermesmobile.ui.screens.LocalChatVoiceNoteActions provides remember(vm, s.pendingVoice) {
+            com.nousresearch.hermesmobile.ui.screens.ChatVoiceNoteActions(
+                onSendVoice = vm::sendChatVoiceNote, pendingVoice = s.pendingVoice,
+                onVoiceRetry = vm::retryGroupVoice, onVoiceAudioOnly = vm::sendGroupVoiceAudioOnly, onVoiceDiscard = vm::discardGroupVoice
+            )
+        }
+    ) {
     ChatScreen(
         profiles = s.profiles,
         sessions = s.sessions,
