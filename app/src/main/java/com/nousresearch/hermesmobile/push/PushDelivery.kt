@@ -142,7 +142,7 @@ object PushDelivery {
      * content could not be fetched yet — it is generic. With it, the real title and text appear in the shade, and
      * on the lock screen too unless the user turned that off. Returns false when nothing was posted.
      */
-    fun show(context: Context, eventId: String, event: JSONObject? = null): Boolean {
+    fun show(context: Context, eventId: String, event: JSONObject? = null, merged: MergedFile? = null): Boolean {
         if (!permitted(context)) return false
         // The user is looking at that very chat: the answer is already on screen.
         val session = event?.optString("session_id").orEmpty()
@@ -166,6 +166,19 @@ object PushDelivery {
             .setContentTitle("Hermes").setContentText(generic).build()
         val builder = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_hermes).setColor(accent)
             .setContentIntent(tap).setAutoCancel(true).setOnlyAlertOnce(true)
+        val profile = event?.optString("profile").orEmpty()
+        if (profile.isNotBlank()) {
+            // One Android group per bot (not one "Hermes" stack), with the bot's avatar as the large icon.
+            builder.setGroup(PushGrouping.groupKey(profile)).setLargeIcon(PushGrouping.largeIcon(context, profile))
+                .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+        }
+        if (merged != null) {
+            // The file that followed this text: an action button that downloads and opens it.
+            val fileIntent = Intent(context, MainActivity::class.java).setAction("hermes.notification")
+                .putExtra("event_id", merged.eventId).setData(android.net.Uri.parse("hermes-notification:${merged.eventId}"))
+            builder.addAction(0, PushGrouping.fileLabel(merged.name),
+                PendingIntent.getActivity(context, 1, fileIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+        }
         if (event == null) {
             builder.setContentTitle("Hermes").setContentText(generic).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         } else {
@@ -179,7 +192,44 @@ object PushDelivery {
                 .setPublicVersion(publicVersion)
         }
         nm.notify(eventId, 0, builder.build())
+        if (profile.isNotBlank()) postSummary(context, nm, profile, accent)
         return true
+    }
+
+    /** A file that arrived right after a text from the same bot, shown as an action on that text's notice. */
+    class MergedFile(val eventId: String, val name: String)
+
+    private const val LAST_TEXT = "last_text"
+    private fun rememberText(context: Context, event: JSONObject) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(LAST_TEXT + ":" + event.optString("profile"), JSONObject().put("at", System.currentTimeMillis()).put("event", event).toString()).apply()
+    }
+
+    /**
+     * A file-only notice from a bot whose text notice is still in the shade (and under 10 s old) joins that notice as
+     * an action button. Returns true when merged, so the file gets no row of its own.
+     */
+    private fun mergeIntoText(context: Context, nm: NotificationManager, event: JSONObject, files: List<String>): Boolean {
+        val profile = event.optString("profile")
+        val saved = runCatching { JSONObject(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(LAST_TEXT + ":" + profile, null) ?: return false) }.getOrNull() ?: return false
+        val text = saved.optJSONObject("event") ?: return false
+        val textId = text.optString("event_id")
+        if (!PushGrouping.shouldMerge(profile, saved.optLong("at"), profile, System.currentTimeMillis())) return false
+        if (nm.activeNotifications.none { it.tag == textId }) return false
+        return show(context, textId, text, MergedFile(event.optString("event_id"), PushMedia.name(files.first())))
+    }
+
+    private fun postSummary(context: Context, nm: NotificationManager, profile: String, accent: Int) {
+        val key = PushGrouping.groupKey(profile)
+        val count = nm.activeNotifications.count { it.notification.group == key && it.tag != PushGrouping.summaryTag(profile) }
+        if (count < 1) return
+        val summary = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_hermes).setColor(accent)
+            .setContentTitle(PushGrouping.botName(profile)).setContentText(PushGrouping.summaryText(profile, count))
+            .setGroup(key).setGroupSummary(true).setAutoCancel(true).setOnlyAlertOnce(true)
+            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            .setContentIntent(PendingIntent.getActivity(context, 2, Intent(context, MainActivity::class.java).setAction("hermes.bot.$profile"), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .build()
+        nm.notify(PushGrouping.summaryTag(profile), 0, summary)
     }
     /** Removes a notice from the shade and the inbox: the server withdrew it. */
     fun withdraw(context: Context, eventId: String) {
@@ -212,8 +262,16 @@ object PushDelivery {
             context.getSystemService(NotificationManager::class.java).cancel(id, 0)
             return true
         }
+        val files = PushMedia.paths(event.optString("body"))
+        val nm = context.getSystemService(NotificationManager::class.java)
+        if (files.isNotEmpty() && PushMedia.text(CronWrapper.strip(event.optString("body"))).isBlank() && permitted(context) &&
+            mergeIntoText(context, nm, event, files)) {
+            nm.cancel(id, 0)   // drop the generic placeholder, if one was posted before the fetch
+            return true
+        }
         // Replaces the generic notice (same tag) with the real content.
         val shown = show(context, id, event)
+        if (shown && files.isEmpty() && event.optString("profile").isNotBlank()) rememberText(context, event)
         return shown || event.optString("session_id").let { it.isNotBlank() && AppPresence.isShowing(it) }
     }
 

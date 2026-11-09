@@ -1916,12 +1916,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun dropAvatarCache(name: String, markMissing: Boolean = false) {
         avatarAssets.remove(name)
         avatarCacheOrder.remove(name)
-        if (markMissing) avatarMissing.add(name) else avatarMissing.remove(name)
+        if (markMissing) { avatarMissing.add(name); com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(getApplication(), name, null) } else avatarMissing.remove(name)
     }
 
     private fun cacheAvatar(name: String, data: String) {
         avatarMissing.remove(name)
         avatarAssets[name] = data
+        getApplication<android.app.Application>().let { com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(it, name, data) }
         avatarCacheOrder.remove(name)
         avatarCacheOrder.addLast(name)
         while (avatarCacheOrder.size > MAX_AVATAR_CACHE_ITEMS) {
