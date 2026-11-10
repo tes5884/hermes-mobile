@@ -183,6 +183,8 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                 }
                 Box(Modifier.weight(1f).fillMaxHeight()) {
 
+                // Rooms: a tapped file link opens the same viewer as 1:1, with the posting bot's profile.
+                var roomFile by remember { mutableStateOf<com.nousresearch.hermesmobile.ui.components.RoomArtifact?>(null) }
                 when (s.section) {
                     MainSection.HOME -> ExperienceHome(s, openDrawer, vm::switchSection, { vm.newChat() }, vm::openSession) { searchOpen = true }
                     MainSection.SYSTEM -> vm.featureRepository()?.let { repo -> key(repo, s.selectedProfile) {
@@ -193,7 +195,10 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         // Rooms have no chat session: a blank session makes MEDIA:<path> previews read the
                         // file by path with the posting bot's profile (GroupChatScreen swaps the profile per event).
                         com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides vm.featureRepository()?.let { r ->
-                            remember(r) { com.nousresearch.hermesmobile.ui.components.ArtifactOwner(r, "", "") {} }
+                            remember(r, s.selectedProfile) {
+                                val show = com.nousresearch.hermesmobile.ui.components.roomOpenAs(roomFallbackProfile(s.selectedProfile)) { roomFile = it }
+                                com.nousresearch.hermesmobile.ui.components.ArtifactOwner(r, "", "", openAs = show) { path -> show("", path) }
+                            }
                         },
                         com.nousresearch.hermesmobile.ui.screens.LocalGroupAttachmentActions provides remember(vm, s.pendingVoice) {
                             com.nousresearch.hermesmobile.ui.screens.GroupAttachmentActions(
@@ -422,6 +427,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onOpen = vm::switchSection
                     )
                 }
+                roomFile?.let { file -> vm.featureRepository()?.let { repo -> RoomFileViewer(repo, file) { roomFile = null } } }
                 if (s.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
@@ -507,6 +513,27 @@ private fun ChatRoute(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Unit)
         return
     }
     ChatContent(vm, s, onMenu, viewTabs)
+}
+
+/** A room has no chat session: the viewer reads the file by path (fs routes, like room image previews). */
+internal fun roomFallbackProfile(selected: String): String = selected.takeUnless { it.isBlank() || it == "all" } ?: "default"
+
+@Composable
+private fun RoomFileViewer(repo: com.nousresearch.hermesmobile.data.HermesRepository, file: com.nousresearch.hermesmobile.ui.components.RoomArtifact, onClose: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val features = remember(repo, file.profile) { ParityController(repo, file.profile, scope) }
+    DisposableEffect(features) { onDispose { features.dispose() } }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize()) {
+            Column {
+                TextButton(onClick = onClose) { Text(stringResource(R.string.ui_5978844cb6)) }
+                if (features.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                features.message?.let { message -> Text(com.nousresearch.hermesmobile.features.shown(message), Modifier.padding(16.dp)) }
+                key(file) { FilesPage(features, file.path, null, onExit = onClose) }
+                FeatureConsent(features)
+            }
+        }
+    }
 }
 
 @Composable

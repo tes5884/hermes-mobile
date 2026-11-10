@@ -1,5 +1,6 @@
 package com.nousresearch.hermesmobile.ui.screens
 
+import com.nousresearch.hermesmobile.ui.components.forPoster
 import com.nousresearch.hermesmobile.R
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.platform.LocalContext
@@ -657,7 +658,7 @@ internal fun RoomEventRow(
                     event.attachments.forEach { RoomAttachment(event.eventId, it) }
                     if (event.text.isNotBlank()) {
                         val base = com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner.current
-                        val owner = remember(base, member?.profile) { base?.let { b -> member?.profile?.takeIf { it.isNotBlank() }?.let { b.copy(profile = it) } ?: b } }
+                        val owner = remember(base, member?.profile) { base?.forPoster(member?.profile) }
                         androidx.compose.runtime.CompositionLocalProvider(com.nousresearch.hermesmobile.ui.components.LocalArtifactOwner provides owner) {
                             com.nousresearch.hermesmobile.ui.components.MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.renderCaptioned(event.text))
                         }

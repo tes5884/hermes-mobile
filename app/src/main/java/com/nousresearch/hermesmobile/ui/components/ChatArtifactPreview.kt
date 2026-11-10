@@ -41,7 +41,36 @@ import com.nousresearch.hermesmobile.features.MobileFiles
 import com.nousresearch.hermesmobile.ui.theme.hermes
 import kotlinx.coroutines.*
 
-data class ArtifactOwner(val repo: HermesRepository, val profile: String, val session: String, val open: (String) -> Unit)
+data class ArtifactOwner(
+    val repo: HermesRepository,
+    val profile: String,
+    val session: String,
+    /** Rooms only: opens a file with a given profile, so a post's file opens as the bot that posted it. */
+    val openAs: ((profile: String, path: String) -> Unit)? = null,
+    val open: (String) -> Unit
+)
+
+/** A room mixes bots: a post's previews and file links use the poster's profile. Blank poster keeps the room owner. */
+fun ArtifactOwner.forPoster(poster: String?): ArtifactOwner {
+    val profile = poster?.takeIf { it.isNotBlank() } ?: return this
+    return copy(profile = profile, open = posterOpen(profile, openAs, open))
+}
+
+internal fun posterOpen(poster: String, openAs: ((String, String) -> Unit)?, open: (String) -> Unit): (String) -> Unit =
+    openAs?.let { show -> { path: String -> show(poster, path) } } ?: open
+
+/** The file a room viewer opens: the poster's profile, or the fallback when the post has none. */
+data class RoomArtifact(val profile: String, val path: String)
+
+/** A room's open callback: files open in the viewer with the poster's profile (fallback when unknown). */
+internal fun roomOpenAs(fallback: String, show: (RoomArtifact) -> Unit): (String, String) -> Unit =
+    { profile, path -> show(RoomArtifact(profile.ifBlank { fallback }, path)) }
+
+/** A tapped link: a file path opens the viewer when the chat owns artifacts; anything else goes to the browser. */
+internal fun tapLink(link: String, open: ((String) -> Unit)?, openUri: (String) -> Unit) {
+    val path = artifactPath(link)
+    if (path != null && open != null) open(path) else openUri(link)
+}
 val LocalArtifactOwner = staticCompositionLocalOf<ArtifactOwner?> { null }
 
 /** Decoded previews survive row disposal so scrolling back does not re-download or resize. */

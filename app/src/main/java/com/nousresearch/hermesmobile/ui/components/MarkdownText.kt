@@ -272,7 +272,7 @@ private fun inlineText(node: Node): AnnotatedString {
     val codeColor = MaterialTheme.colorScheme.surfaceVariant
     return remember(node, linkColor, codeColor, uriHandler, artifactOwner) {
         renderMarkdownInline(node, linkColor, codeColor, hideArtifactImages = artifactOwner != null) { link ->
-            artifactPath(link)?.let { artifactOwner?.open?.invoke(it) } ?: uriHandler.openUri(link)
+            tapLink(link, artifactOwner?.open, uriHandler::openUri)
         }
     }
 }
