@@ -508,6 +508,7 @@ private fun GroupRoomView(
         LaunchedEffect(recorderLimit) { if (recorderLimit) { recorderLimit = false; if (recorder.active) finishRecording() } }
         LaunchedEffect(tooltip) { if (tooltip) { kotlinx.coroutines.delay(2000); tooltip = false } }
         DisposableEffect(recorder) { onDispose { recorder.cancel() } }
+        com.nousresearch.hermesmobile.features.KeepScreenOnWhile(recordingMs != null)
         micError?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
 
         val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }

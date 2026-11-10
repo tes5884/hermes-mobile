@@ -125,6 +125,7 @@ internal fun rememberVoiceNoteRig(key: Any, onSend: (java.io.File, Long) -> Unit
     LaunchedEffect(limit) { if (limit) { limit = false; if (recorder.active) rig.finishRecording() } }
     LaunchedEffect(rig.tooltip) { if (rig.tooltip) { kotlinx.coroutines.delay(2000); rig.tooltip = false } }
     DisposableEffect(recorder) { onDispose { recorder.cancel() } }
+    com.nousresearch.hermesmobile.features.KeepScreenOnWhile(rig.recording)
     return rig
 }
 
