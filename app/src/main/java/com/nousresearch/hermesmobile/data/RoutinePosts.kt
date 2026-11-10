@@ -3,45 +3,54 @@ package com.nousresearch.hermesmobile.data
 /**
  * LOCAL (routine-chat): what a scheduled routine wrote, as opposed to what a person or a bot said.
  *
- * - In a bot's own chat, our hermes-android plugin patch stores a routine's result as a bot-side message wrapped in
- *   two label lines (the model reads them as "automated output"; people should not have to). [parts] lifts those
- *   lines out and says which stretches of a message are routine output.
+ * - In a bot's own chat, our hermes-android plugin patch stores a routine's result as a bot-side message: a head
+ *   label line and an end label line that share one random id, and between them every line of the result quoted
+ *   with "> " (the model reads that as "automated output"; people should not have to). [parts] lifts the two label
+ *   lines out, takes the quote prefix off, and says which stretches of a message are routine output.
  * - In a room, Hermes writes a scheduled post as `message.user` with an actor id "cron:<job>" / "cron-notice:<job>",
  *   so it would otherwise be drawn as the user's own message. [isScheduled] tells them apart.
  */
 object RoutinePosts {
-    private val HEAD = Regex("""^\[Automated routine result: "(.*)"\. Produced by a scheduled job.*]$""")
-    private const val TAIL = "[End of automated routine result]"
+    private val HEAD = Regex("""^\[Automated routine result id=([0-9a-f]{8}): "(.*)"\. Produced by a scheduled job.*]$""")
+    private const val MARK = "[Automated routine result id="
+    private fun tail(id: String) = "[End of automated routine result id=$id]"
 
     /** A stretch of one message: routine output when [routine] is non-null (the routine's name, possibly blank). */
     data class Part(val routine: String?, val text: String)
 
-    fun hasRoutine(content: String): Boolean = content.contains("[Automated routine result: \"")
+    fun hasRoutine(content: String): Boolean = content.contains(MARK)
+
+    /** A quoted line as the routine wrote it: the "> " the plugin put in front is taken off (">" for an empty line). */
+    private fun unquote(line: String): String =
+        if (line.startsWith("> ")) line.substring(2) else if (line.startsWith(">")) line.substring(1) else line
 
     /**
-     * Splits [content] into ordinary text and labelled routine results, in order, label lines removed. Hermes merges
-     * back-to-back bot turns, so one message can hold a reply followed by one or more routine results. A head line
-     * with no tail (cut off) still counts as routine output up to the end.
+     * Splits [content] into ordinary text and labelled routine results, in order: label lines removed, quote prefix
+     * taken off each result line. Hermes merges back-to-back bot turns, so one message can hold a reply followed by
+     * one or more routine results. A result runs from a head line to the end line with the SAME id and nothing else
+     * closes it; a head line with no such end line is ordinary text.
      */
     fun parts(content: String): List<Part> {
         if (!hasRoutine(content)) return listOf(Part(null, content))
+        val lines = content.split("\n")
         val out = mutableListOf<Part>()
-        val buffer = StringBuilder()
-        var routine: String? = null
-        fun flush() {
-            val text = buffer.toString().trim('\n')
+        val plain = mutableListOf<String>()
+        fun add(routine: String?, body: List<String>) {
+            val text = body.joinToString("\n").trim('\n')
             if (text.isNotBlank()) out += Part(routine, text)
-            buffer.setLength(0)
         }
-        for (line in content.split("\n")) {
-            val head = if (routine == null) HEAD.matchEntire(line.trim()) else null
-            when {
-                head != null -> { flush(); routine = head.groupValues[1] }
-                routine != null && line.trim() == TAIL -> { flush(); routine = null }
-                else -> buffer.append(line).append('\n')
+        var i = 0
+        while (i < lines.size) {
+            val head = HEAD.matchEntire(lines[i].trim())
+            val end = if (head == null) -1 else tail(head.groupValues[1]).let { t ->
+                (i + 1 until lines.size).firstOrNull { lines[it].trim() == t } ?: -1
             }
+            if (head == null || end < 0) { plain += lines[i]; i++; continue }
+            add(null, plain); plain.clear()
+            add(head.groupValues[2], lines.subList(i + 1, end).map(::unquote))
+            i = end + 1
         }
-        flush()
+        add(null, plain)
         return out.ifEmpty { listOf(Part(null, "")) }
     }
 
