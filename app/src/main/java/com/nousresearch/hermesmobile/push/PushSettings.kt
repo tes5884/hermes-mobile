@@ -405,7 +405,9 @@ fun PushSettings(
             }
         }
         item { SectionLabel(stringResource(R.string.push_inbox)) }
-        val inbox = events.filter { it.optString("connection") == config?.id && it.optString("profile") == profile }
+        // A routine result already sits in the bot's chat (or the room): no second copy here. The store keeps it for the tap.
+        val inbox = events.filter { it.optString("connection") == config?.id && it.optString("profile") == profile &&
+            !com.nousresearch.hermesmobile.data.RoutinePosts.livesInChat(it.optString("event_type"), it.optString("session_id")) }
         if (inbox.isEmpty()) item {
             Text(stringResource(R.string.push_empty), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)

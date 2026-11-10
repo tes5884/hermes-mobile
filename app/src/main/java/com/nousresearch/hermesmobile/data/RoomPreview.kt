@@ -7,9 +7,10 @@ object RoomPreviews {
     /** Newest message.user / message.member; status lines (turn.*, member.*, ...) are skipped. */
     fun last(room: GroupRoom, events: List<GroupEvent>): RoomPreview? {
         val e = events.filter { it.kind == "message.user" || it.kind == "message.member" }.maxByOrNull { it.seq } ?: return null
-        val fromUser = e.kind == "message.user"
+        val scheduled = RoutinePosts.isScheduled(e)
+        val fromUser = e.kind == "message.user" && !scheduled
         val member = room.members.firstOrNull { it.memberId == e.memberId }
-        val sender = if (fromUser) "" else
+        val sender = if (fromUser) "" else if (scheduled) RoutinePosts.name(e.actor.displayName).ifBlank { "Routine" } else
             (member?.label ?: e.actor.displayName.ifBlank { e.actor.profile.ifBlank { e.actor.id } })
         val firstLine = e.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
             ?: if (e.attachments.isNotEmpty()) "📎" else ""

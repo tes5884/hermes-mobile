@@ -305,6 +305,14 @@ private fun GroupRoomView(
         }
         ready = true
     }
+    // A tapped routine notice: land on that post (after the unread-divider scroll), once.
+    val pushAnchor = PushAnchor.pending(room = true)
+    LaunchedEffect(roomKey, ready, pushAnchor, reversedRows.size) {
+        if (!ready || pushAnchor == null) return@LaunchedEffect
+        val post = com.nousresearch.hermesmobile.data.RoutinePosts.roomTarget(visibleEvents, pushAnchor.text) ?: return@LaunchedEffect
+        val idx = reversedRows.indexOfFirst { it is RoomRow.Event && it.event.seq == post.seq }
+        if (idx >= 0) { listState.scrollToItem(idx); PushAnchor.clear() }
+    }
     LaunchedEffect(roomKey, ready) {
         if (!ready) return@LaunchedEffect
         snapshotFlow {
@@ -616,7 +624,8 @@ internal fun RoomEventRow(
     onReplyTo: (String) -> Unit
 ) {
     if (event.visibleMessage) {
-        val user = event.kind == "message.user"
+        val scheduled = com.nousresearch.hermesmobile.data.RoutinePosts.isScheduled(event)
+        val user = event.kind == "message.user" && !scheduled
         val maxBubble = (LocalConfiguration.current.screenWidthDp * 0.8f).dp
         val shape = androidx.compose.foundation.shape.RoundedCornerShape(
             topStart = 18.dp, topEnd = 18.dp,
@@ -625,14 +634,18 @@ internal fun RoomEventRow(
         val canThread = !user && event.threadId.isNotBlank()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
             Surface(
-                color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f),
+                color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (scheduled) .3f else .55f),
                 shape = shape,
+                border = if (scheduled) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
                 modifier = Modifier.widthIn(max = maxBubble).clip(shape)
                     .then(if (canThread) Modifier.combinedClickable(onClick = {}, onLongClick = onReplyThread) else Modifier)
             ) {
                 Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     val timeText = RoomRows.millis(event)?.let { android.text.format.DateFormat.getTimeFormat(LocalContext.current).format(java.util.Date(it)) }
-                    if (!user) {
+                    if (scheduled) {
+                        com.nousresearch.hermesmobile.ui.components.RoutinePostHeader(com.nousresearch.hermesmobile.data.RoutinePosts.name(event.actor.displayName))
+                        Spacer(Modifier.height(3.dp))
+                    } else if (!user) {
                         Text(
                             member?.let { "@${it.handle} · ${it.label}" } ?: event.actor.displayName.ifBlank { event.actor.id },
                             style = MaterialTheme.typography.labelMedium,

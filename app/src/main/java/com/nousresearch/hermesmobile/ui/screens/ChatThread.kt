@@ -222,6 +222,16 @@ internal fun ChatThread(
         if (pinTick > 0) { pinActive = true; state.scrollToItem(0); kotlinx.coroutines.delay(2500); pinActive = false }
     }
     LaunchedEffect(entries.size) { if (pinActive) state.scrollToItem(0) }
+    // A tapped routine notice: land on that message (newest match), once. Not found in the loaded page: stay at the latest.
+    val pushAnchor = PushAnchor.pending(room = false)
+    LaunchedEffect(conversationIdentity, pushAnchor, entries.size) {
+        val anchor = pushAnchor ?: return@LaunchedEffect
+        val idx = entries.indexOfFirst { entry ->
+            val message = ((entry as? ChatListEntry.Row)?.row?.entry as? ChatTimelineItem.Message)?.message
+            message != null && message.role == "assistant" && com.nousresearch.hermesmobile.data.RoutinePosts.holdsAnchor(message.content, anchor.text)
+        }
+        if (idx >= 0) { state.scrollToItem(idx); PushAnchor.clear() }
+    }
     val send: (String) -> Unit = send@{ text ->
         if (SlashCommands.local(text) == LocalSlash.MODEL) {
             actions.onDraftChange("")
@@ -436,13 +446,19 @@ private fun ChatTranscriptRow(
             val copyable = message.role == "user" && message.content.isNotBlank()
             // A read-only transcript (a Kanban worker's) cannot be edited, retried or branched; copy and share stay.
             val editable = copyable && !readOnly
+            // A routine's result (plugin patch) is drawn as an automation post, its two label lines hidden.
+            val routine = message.role == "assistant" && com.nousresearch.hermesmobile.data.RoutinePosts.hasRoutine(message.content)
             Column {
-                ChatMessageBubble(
+                if (routine) com.nousresearch.hermesmobile.data.RoutinePosts.parts(message.content).forEach { part ->
+                    if (part.routine == null) ChatMessageBubble(message.copy(content = part.text))
+                    else com.nousresearch.hermesmobile.ui.components.RoutinePostCard(part.routine) { ChatMessageBubble(message.copy(content = part.text, reasoning = "")) }
+                }
+                else ChatMessageBubble(
                     message,
                     onEdit = if (editable) ({ onEdit(message) }) else null,
                     onCopy = if (copyable) ({ onCopy(message.content) }) else null
                 )
-                if (turnEnd) AssistantActions(message.content, canRetry, readOnly, voice, onCopy, onShare, onRetry, onBranch)
+                if (turnEnd) AssistantActions(com.nousresearch.hermesmobile.data.RoutinePosts.plain(message.content), canRetry, readOnly, voice, onCopy, onShare, onRetry, onBranch)
             }
         }
         is ChatTimelineItem.Activity -> ChatActivityBlock(entry.steps)

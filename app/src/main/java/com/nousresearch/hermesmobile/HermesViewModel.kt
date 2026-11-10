@@ -2770,7 +2770,15 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 if (uiState.activeConnectionId != connection) return@launch
                 if (uiState.connectionState == GatewayConnectionState.CONNECTED && uiState.profiles.any { it.name == profile }) {
                     // Room notices (plugin "room-push") carry session_id "room:<room id>": open that group chat.
-                    if (sid != null && sid.startsWith("room:")) { openRoomNotification(sid.removePrefix("room:")); return@launch }
+                    // A routine notice lands on its message, not just in the chat or room (cleared once used).
+                    val routine = com.nousresearch.hermesmobile.data.RoutinePosts.livesInChat(event.optString("event_type"), sid.orEmpty())
+                    val body = com.nousresearch.hermesmobile.push.PushMedia.text(com.nousresearch.hermesmobile.push.CronWrapper.strip(event.optString("body")))
+                    if (sid != null && sid.startsWith("room:")) {
+                        if (routine) com.nousresearch.hermesmobile.ui.screens.PushAnchor.set(room = true, text = body)
+                        openRoomNotification(sid.removePrefix("room:")); return@launch
+                    }
+                    if (sid != null && routine) com.nousresearch.hermesmobile.ui.screens.PushAnchor.set(
+                        room = false, text = com.nousresearch.hermesmobile.data.RoutinePosts.anchorLine(body))
                     if (sid != null) openSession(HermesSession(id = sid, profile = profile, title = "Hermes"))
                     else {
                         // No chat named (cron deliveries): that bot's canonical Bot Chat, never the notifications page.

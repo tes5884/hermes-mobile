@@ -7,7 +7,7 @@ import android.content.SharedPreferences
  * highest seq that was actually on screen. Reading on the desktop does not move this.
  */
 object RoomRead {
-    private fun isFromBot(e: GroupEvent) = e.kind == "message.member"
+    private fun isFromBot(e: GroupEvent) = e.kind == "message.member" || RoutinePosts.isScheduled(e)
 
     /** First message from a bot newer than what was seen; null when nothing is unread or there is no saved position. */
     fun firstUnreadSeq(events: List<GroupEvent>, saved: Long?): Long? =
@@ -16,7 +16,7 @@ object RoomRead {
     fun unreadCount(events: List<GroupEvent>, seen: Long): Int = events.count { isFromBot(it) && it.seq > seen }
 
     /** Tzvi's own newest message: sending counts as having read everything up to it. */
-    fun newestOwnSeq(events: List<GroupEvent>): Long = events.filter { it.kind == "message.user" }.maxOfOrNull { it.seq } ?: 0L
+    fun newestOwnSeq(events: List<GroupEvent>): Long = events.filter { it.kind == "message.user" && !RoutinePosts.isScheduled(it) }.maxOfOrNull { it.seq } ?: 0L
 
     /**
      * Rooms-list badge: bot messages after the phone's last-seen marker. Tzvi's own messages and status lines never

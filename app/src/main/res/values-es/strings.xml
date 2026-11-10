@@ -114,4 +114,5 @@
     <string name="group_voice_audio_only">Enviar solo audio</string>
     <string name="group_voice_pause">Pausar nota de voz</string>
     <string name="room_you_prefix">Tú</string>
+    <string name="routine_post">Rutina</string>
 </resources>
