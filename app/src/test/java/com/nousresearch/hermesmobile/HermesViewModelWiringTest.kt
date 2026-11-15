@@ -35,9 +35,11 @@ class HermesViewModelWiringTest {
     @Test fun theScreenStateHasOneWriterAndItReconciles() {
         val setter = body("var uiState: HermesUiState")
         assertTrue(setter.contains("reconcileChatChange()"))
-        // The backing state is written by the setter and by the reconcile itself (closing the channels list), nowhere else.
+        // The backing state is written by the setter and by the reconcile itself (closing the channels list or Bot details
+        // once what they belong to is gone, via settleOverlays), nowhere else.
         assertEquals(2, count("""uiStateValue\s*="""))
-        assertTrue(body("private fun reconcileChatChange()").contains("uiStateValue = uiState.copy(channelsListOpen = false)"))
+        assertTrue(body("private fun reconcileChatChange()").contains("val settled = settleOverlays(uiState)"))
+        assertTrue(body("private fun reconcileChatChange()").contains("uiStateValue = settled"))
     }
 
     @Test fun everyNavigationStepGoesThroughNavigate() {
@@ -57,6 +59,21 @@ class HermesViewModelWiringTest {
         assertFalse(source.contains("adoptInlineApprovals"))
         // Approvals are routed against the same view the reconcile uses.
         assertTrue(source.contains("approvalRouter.onRequest(request, chatViewOf(uiState, connectionEpoch).surface)"))
+    }
+
+    /** P4: Bot details covers the chat like Search: view-model state the view reads, closed by any navigation. */
+    @Test fun botDetailsIsViewModelStateTheReconcileSees() {
+        assertTrue(body("internal fun chatViewOf(").contains("&& state.botDetails == null"))
+        assertTrue(body("internal fun chatViewOf(").contains("details = state.botDetails?.profile"))
+        assertTrue(body("private fun navigate()").contains("botDetails = null"))
+        assertTrue(body("fun openBotDetails(").contains("uiState = uiState.copy(botDetails ="))
+        assertTrue(body("fun closeBotDetails(").contains("uiState = uiState.copy(botDetails = null)"))
+        val app = listOf(
+            File("src/main/java/com/nousresearch/hermesmobile/HermesMobileApp.kt"),
+            File("app/src/main/java/com/nousresearch/hermesmobile/HermesMobileApp.kt")
+        ).first { it.exists() }.readText()
+        assertFalse("Bot details must not be Compose-local state", Regex("""var\s+botDetails\b""").containsMatchIn(app))
+        assertTrue(app.contains("onBotDetails = vm::openBotDetails"))
     }
 
     /**

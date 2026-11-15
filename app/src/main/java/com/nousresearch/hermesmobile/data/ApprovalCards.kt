@@ -24,11 +24,25 @@ object ApprovalCards {
         val state: State = State.PENDING,
         val resolvedAtMs: Long = 0L
     ) {
+        /** Hermes' [description] is a sentence written for the user, not just the name of the pattern that stopped it. */
+        val plainDescription: Boolean get() = !CommandSummary.isPatternLabel(description, reason)
+
+        /**
+         * When the description is only a pattern name ("recursive delete"), the headline comes from the command
+         * instead: what it does, to what, where ([CommandSummary]). Null when the description already says it.
+         */
+        val summary: CommandSummary.Summary? get() = if (!plainDescription && command.isNotBlank()) CommandSummary.of(command) else null
+
+        /** The pattern name, shown as a small line under a command-made headline; blank otherwise. */
+        val label: String get() = if (summary != null) description.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty() else ""
+
         /** The plain-words line: the description, else the command's first line. */
         val title: String get() = description.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+            ?.let { if (plainDescription) it else it.replaceFirstChar { c -> c.uppercase() } }
             ?: command.lineSequence().firstOrNull().orEmpty().trim()
         /** Anything the description says after its first line (the effect, in the mock). */
-        val effect: String get() = description.lineSequence().filter { it.isNotBlank() }.drop(1).joinToString(" ").trim()
+        val effect: String get() = if (!plainDescription) "" else
+            description.lineSequence().filter { it.isNotBlank() }.drop(1).joinToString(" ").trim()
     }
 
     /** What an approval request offers on this card: once, always (only when Hermes allows it), deny. */

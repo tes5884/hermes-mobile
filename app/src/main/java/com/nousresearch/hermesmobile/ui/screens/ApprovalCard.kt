@@ -30,6 +30,7 @@ import com.nousresearch.hermesmobile.data.BotHome
 import com.nousresearch.hermesmobile.ui.components.CollapsibleCommand
 import com.nousresearch.hermesmobile.ui.theme.HermesTokens
 import com.nousresearch.hermesmobile.ui.theme.hermes
+import com.nousresearch.hermesmobile.data.CommandSummary.Kind as SummaryKind
 
 /**
  * One approval card inline in a bot's chat (Nova's mock 3/3b). Pending: "<Bot> needs your OK", the plain-words
@@ -78,9 +79,15 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Text(card.title, style = if (pending) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge,
+            val headline = card.summary?.let { approvalHeadline(it) } ?: card.title
+            Text(headline, style = if (pending) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge,
                 fontWeight = if (pending) FontWeight.SemiBold else FontWeight.Medium,
                 color = if (card.state == ApprovalCards.State.DENIED) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
+            if (card.label.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(stringResource(R.string.approval_flagged, card.label), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (pending && card.effect.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text(card.effect, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -132,6 +139,47 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
                 }
             }
         }
+    }
+}
+
+/**
+ * A command-made headline in plain words (\"Delete the folder “test” in …/ezra/scratch\"). Where the command gives no
+ * place, the sentence without one is used.
+ */
+@Composable
+internal fun approvalHeadline(s: com.nousresearch.hermesmobile.data.CommandSummary.Summary): String {
+    val subject = s.subject
+    val place = s.place
+    @Composable fun pick(withPlace: Int, without: Int, arg: String = subject) =
+        if (place.isNotBlank()) stringResource(withPlace, arg, place) else stringResource(without, arg)
+    @Composable fun named(withName: Int, without: Int) = if (subject.isNotBlank()) stringResource(withName, subject) else stringResource(without)
+    return when (s.kind) {
+        SummaryKind.DELETE_FOLDER -> pick(R.string.approval_h_delete_folder_in, R.string.approval_h_delete_folder)
+        SummaryKind.DELETE_FILE -> pick(R.string.approval_h_delete_file_in, R.string.approval_h_delete_file)
+        SummaryKind.DELETE_MANY -> pick(R.string.approval_h_delete_many_in, R.string.approval_h_delete_many)
+        SummaryKind.FORCE_PUSH -> if (place.isNotBlank()) stringResource(R.string.approval_h_force_push_to, subject.ifBlank { "…" }, place) else stringResource(R.string.approval_h_force_push)
+        SummaryKind.PUSH -> if (place.isNotBlank()) stringResource(R.string.approval_h_push_to, subject.ifBlank { "…" }, place) else stringResource(R.string.approval_h_push)
+        SummaryKind.DISCARD_CHANGES -> stringResource(R.string.approval_h_discard_changes)
+        SummaryKind.DELETE_UNTRACKED -> stringResource(R.string.approval_h_delete_untracked)
+        SummaryKind.RESTART_SERVICE -> named(R.string.approval_h_restart_service, R.string.approval_h_restart_service_any)
+        SummaryKind.STOP_SERVICE -> named(R.string.approval_h_stop_service, R.string.approval_h_stop_service_any)
+        SummaryKind.START_SERVICE -> named(R.string.approval_h_start_service, R.string.approval_h_start_service_any)
+        SummaryKind.DISABLE_SERVICE -> named(R.string.approval_h_disable_service, R.string.approval_h_disable_service_any)
+        SummaryKind.RESTART_CONTAINER -> named(R.string.approval_h_restart_container, R.string.approval_h_restart_container_any)
+        SummaryKind.STOP_CONTAINER -> named(R.string.approval_h_stop_container, R.string.approval_h_stop_container_any)
+        SummaryKind.REMOVE_CONTAINER -> named(R.string.approval_h_remove_container, R.string.approval_h_remove_container_any)
+        SummaryKind.STOP_PROCESS -> named(R.string.approval_h_stop_process, R.string.approval_h_stop_process_any)
+        SummaryKind.CHANGE_PERMISSIONS -> pick(R.string.approval_h_permissions_in, R.string.approval_h_permissions)
+        SummaryKind.CHANGE_OWNER -> pick(R.string.approval_h_owner_in, R.string.approval_h_owner)
+        SummaryKind.MOVE -> if (place.isNotBlank()) stringResource(R.string.approval_h_move, subject, place) else stringResource(R.string.approval_h_run, subject)
+        SummaryKind.WRITE_DISK -> named(R.string.approval_h_write_disk, R.string.approval_h_write_disk_any)
+        SummaryKind.FORMAT_DISK -> named(R.string.approval_h_format_disk, R.string.approval_h_format_disk_any)
+        SummaryKind.RUN_REMOTE_SCRIPT -> if (place.isNotBlank()) stringResource(R.string.approval_h_remote_script_from, place) else stringResource(R.string.approval_h_remote_script)
+        SummaryKind.EDIT_FILE -> pick(R.string.approval_h_edit_file_in, R.string.approval_h_edit_file)
+        SummaryKind.OVERWRITE_FILE -> pick(R.string.approval_h_overwrite_file_in, R.string.approval_h_overwrite_file)
+        SummaryKind.REBOOT -> stringResource(R.string.approval_h_reboot)
+        SummaryKind.SHUTDOWN -> stringResource(R.string.approval_h_shutdown)
+        SummaryKind.RUN -> stringResource(R.string.approval_h_run, subject)
     }
 }
 

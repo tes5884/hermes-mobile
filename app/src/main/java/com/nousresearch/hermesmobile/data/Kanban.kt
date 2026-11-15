@@ -58,7 +58,9 @@ data class KanbanTask(
     val blockKind: String? = null,
     val lastFailureError: String? = null,
     val consecutiveFailures: Int = 0,
-    val workerPid: Long? = null
+    val workerPid: Long? = null,
+    /** The card's namespace (`tenant`), e.g. a client name; blank when the board doesn't use one. */
+    val tenant: String = ""
 ) {
     companion object {
         fun fromJson(o: JSONObject): KanbanTask? {
@@ -78,7 +80,8 @@ data class KanbanTask(
                 blockKind = o.optStringOrNull("block_kind")?.takeIf { it.isNotBlank() },
                 lastFailureError = o.optStringOrNull("last_failure_error")?.takeIf { it.isNotBlank() },
                 consecutiveFailures = o.optInt("consecutive_failures", 0),
-                workerPid = o.optLongOrNull("worker_pid")
+                workerPid = o.optLongOrNull("worker_pid"),
+                tenant = o.optStringOrNull("tenant")?.trim().orEmpty()
             )
         }
     }

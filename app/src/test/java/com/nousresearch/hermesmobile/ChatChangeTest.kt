@@ -60,7 +60,7 @@ class ChatChangeTest {
 
         /** reconcileChatChange(). */
         fun reconcile() {
-            if (state.channelsListOpen && state.section != MainSection.BOTS) state = state.copy(channelsListOpen = false)
+            state = settleOverlays(state)
             val moves = change.reconcile(view(), generation, dialog.toList())
             cards.retainAll(router.pendingIds)
             moves.toCards.forEach { r -> dialog.removeAll { it.requestId == r.requestId }; cards += r.requestId }
@@ -70,12 +70,21 @@ class ChatChangeTest {
         /** navigate(). */
         fun navigate(): Long {
             generation += 1
-            if (state.searchOpen) set(state.copy(searchOpen = false))
+            if (state.searchOpen || state.botDetails != null) set(state.copy(searchOpen = false, botDetails = null))
             reconcile(); return generation
         }
 
         /** showSearch (drawer Search, Home pill; dismiss or a result closes it first). */
         fun showSearch(open: Boolean) = set(state.copy(searchOpen = open))
+
+        /** openBotDetails (the bot chat's header) up to its guard, and closeBotDetails (back). */
+        fun openDetails(profile: String) {
+            val chat = state.activeChat ?: return
+            if (state.section != MainSection.CHAT || chat.profile != profile ||
+                com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, state.profiles) == null) return
+            set(state.copy(botDetails = com.nousresearch.hermesmobile.data.BotDetailsState(profile)))
+        }
+        fun closeDetails() { if (state.botDetails != null) set(state.copy(botDetails = null)) }
 
         /** onServerRequest for an approval. */
         fun request(r: ServerInteraction): Route = router.onRequest(r, view().surface).also { route ->
@@ -313,6 +322,69 @@ class ChatChangeTest {
         vm.openSession(ezraChat.copy(botChat = false))
         assertFalse(vm.state.searchOpen)
         assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+    }
+
+    // ---- P4: Bot details over the bot chat ----------------------------------------------------------------------
+
+    @Test fun detailsCountsAsAChangeOfView() {
+        val vm = Vm(); vm.openBot(ezra, ezraChat)
+        val shown = vm.view()
+        vm.openDetails("ezra")
+        assertEquals("ezra", vm.state.botDetails?.profile)
+        assertTrue(vm.view() != shown)
+        assertNull("no bot chat is on screen behind Bot details", vm.view().surface)
+        assertFalse(vm.view().showsBotChatOf("ezra", "c1"))
+        vm.closeDetails()
+        assertEquals(shown, vm.view())
+    }
+
+    @Test fun detailsOpensOnlyOverThatBotsChat() {
+        val vm = Vm(); vm.openDetails("ezra"); assertNull(vm.state.botDetails) // no chat
+        vm.openSession(plainChat); vm.openDetails("ezra"); assertNull(vm.state.botDetails) // not a bot chat
+        vm.openBot(ezra, ezraChat); vm.openDetails("otto"); assertNull(vm.state.botDetails) // another bot
+    }
+
+    @Test fun cardThenDetailsGoesToDialogAndBackWhenDetailsCloses() {
+        val vm = waitingCard(); vm.openDetails("ezra"); assertInDialog(vm)
+        vm.closeDetails()
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+    }
+
+    @Test fun approvalArrivingWhileDetailsIsOpenIsADialogAndBecomesACardWhenItCloses() {
+        val vm = Vm(); vm.openBot(ezra, ezraChat); vm.openDetails("ezra")
+        assertEquals(Route.DIALOG, vm.request(approval("r1")))
+        assertInDialog(vm)
+        vm.closeDetails()
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+    }
+
+    @Test fun pushTapWhileDetailsIsOpenClosesItAndLandsOnTheChat() {
+        val vm = waitingCard(); vm.openDetails("ezra"); vm.openSession(plainChat)
+        assertNull(vm.state.botDetails); assertEquals(MainSection.CHAT, vm.state.section)
+        assertInDialog(vm); assertBackToCard(vm)
+        // A push tap to Ezra's own chat closes details too, and the card is back on screen.
+        val vm2 = waitingCard(); vm2.openDetails("ezra"); vm2.openSession(ezraChat.copy(botChat = false))
+        assertNull(vm2.state.botDetails)
+        assertEquals(setOf("r1"), vm2.cards); assertTrue(vm2.dialog.isEmpty())
+    }
+
+    @Test fun detailsClosesWhenThePageOrTheChatChanges() {
+        val vm = waitingCard(); vm.openDetails("ezra"); vm.switchSection(MainSection.BOTS)
+        assertNull("leaving the Chat page closes Bot details", vm.state.botDetails); assertInDialog(vm)
+        vm.switchSection(MainSection.CHAT) // the rail back: the chat, not details
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+        val vm2 = waitingCard(); vm2.openDetails("ezra"); vm2.branch()
+        assertNull(vm2.state.botDetails); assertInDialog(vm2)
+        val vm3 = waitingCard(); vm3.openDetails("ezra"); vm3.closeActiveChat()
+        assertNull(vm3.state.botDetails); assertInDialog(vm3)
+        val vm4 = waitingCard(); vm4.openDetails("ezra"); vm4.switchConnection("c2")
+        assertNull(vm4.state.botDetails); assertTrue(vm4.cards.isEmpty()); assertTrue(vm4.dialog.isEmpty())
+    }
+
+    @Test fun searchOverDetailsKeepsTheChatHidden() {
+        val vm = waitingCard(); vm.openDetails("ezra"); vm.showSearch(true); assertInDialog(vm)
+        vm.showSearch(false); assertInDialog(vm) // details is still over the chat
+        vm.closeDetails(); assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
     }
 
     // ---- P2: a waiting approval card --------------------------------------------------------------------------

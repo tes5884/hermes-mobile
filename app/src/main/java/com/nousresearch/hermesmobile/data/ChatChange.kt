@@ -2,8 +2,9 @@ package com.nousresearch.hermesmobile.data
 
 /**
  * What is on screen, as far as per-chat state cares: the page, the open chat (and whether it is a writable bot chat),
- * the open room, the channels list, the full-screen Search palette, and the connection. Two equal views mean the user is
- * looking at the same thing. While Search is open it covers everything, so no chat counts as shown ([chatPage] is false).
+ * the open room, the channels list, the full-screen Search palette, Bot details, and the connection. Two equal views
+ * mean the user is looking at the same thing. While Search or Bot details is open it covers the chat, so no chat counts
+ * as shown ([chatPage] is false).
  *
  * [epoch] changes when the connection the open chat belongs to ends (disconnect, switch, sign-out), even if the
  * connection id stays the same: requests and recordings of the old connection are dead after that.
@@ -20,7 +21,9 @@ data class ChatView(
     val readOnly: Boolean,
     val room: String?,
     val channelsList: Boolean,
-    val search: Boolean
+    val search: Boolean,
+    /** Bot details is open over the bot chat (whose profile it names): it covers the chat like Search does. */
+    val details: String? = null
 ) {
     /** The bot chat actually on screen, for approval cards, or null. */
     val surface: InlineApprovalRouter.Surface?

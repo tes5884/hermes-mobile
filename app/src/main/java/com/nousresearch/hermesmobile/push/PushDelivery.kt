@@ -53,6 +53,19 @@ object PushDelivery {
     fun setOnlyPhoneTurns(context: Context, only: Boolean) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(ONLY_PHONE_TURNS, only).apply()
 
+    private const val QUIET_BOTS = "quiet_bots"
+
+    /** Bot details → Notifications: [profile] on [connection] rings only when it needs the user ([PushQuiet]). Off by default. */
+    fun quietBot(context: Context, connection: String, profile: String): Boolean =
+        PushQuiet.key(connection, profile) in context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(QUIET_BOTS, emptySet()).orEmpty()
+
+    fun setQuietBot(context: Context, connection: String, profile: String, quiet: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val key = PushQuiet.key(connection, profile)
+        val next = prefs.getStringSet(QUIET_BOTS, emptySet()).orEmpty().toMutableSet().apply { if (quiet) add(key) else remove(key) }
+        prefs.edit().putStringSet(QUIET_BOTS, next).apply()
+    }
+
     /** A prompt sent from this phone started a turn in [sessionId]: its answer may notify. */
     fun claimTurn(context: Context, sessionId: String) = editTurns(context) { claims, _ ->
         if (sessionId.isNotBlank()) claims[sessionId] = claims[sessionId].orEmpty() + System.currentTimeMillis()
@@ -259,6 +272,12 @@ object PushDelivery {
         // A turn started elsewhere (Desktop, the CLI…) stays in the inbox without ringing: whoever started it is there.
         if (event.optString("event_type") in setOf("turn_completed", "turn_failed") &&
             !turnNotifies(context, id, event.optString("session_id"))) {
+            context.getSystemService(NotificationManager::class.java).cancel(id, 0)
+            return true
+        }
+        // "Only when <bot> needs you" (Bot details): the rest of that bot's events stay in the inbox without ringing.
+        // After the turn rule, so a phone turn's claim is still used up by its own answer.
+        if (!PushQuiet.rings(event.optString("event_type"), quietBot(context, account.connection, account.profile))) {
             context.getSystemService(NotificationManager::class.java).cancel(id, 0)
             return true
         }

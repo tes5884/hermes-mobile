@@ -580,6 +580,48 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
             )
         }
     ) {
+    // Bot details (P4) covers the bot's chat while it is open; the chat stays open underneath.
+    val detailsProfile = s.botDetails?.let { d -> chat?.let { c -> botChatProfile(c, s.profiles) }?.takeIf { it.name == d.profile } }
+    if (detailsProfile != null && chat != null && s.botDetails != null) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val connection = s.activeConnectionId.orEmpty()
+        var quiet by remember(connection, detailsProfile.name) {
+            mutableStateOf(com.nousresearch.hermesmobile.push.PushDelivery.quietBot(context, connection, detailsProfile.name))
+        }
+        val dot = com.nousresearch.hermesmobile.data.LiveSessions.dotFor(s.sessionDots, chat.storedSessionId)
+        val waiting = s.interaction?.takeIf { it.method == "approval" && it.params.optString("session_id") == chat.runtimeSessionId }
+        val status = when {
+            waiting != null || dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT ->
+                com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.NEEDS_OK, "")
+            chat.running || dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING ->
+                com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.WORKING, s.liveStatuses.lastOrNull()?.label.orEmpty())
+            else -> com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.IDLE, "")
+        }
+        com.nousresearch.hermesmobile.ui.screens.BotDetailsScreen(
+            profile = detailsProfile,
+            avatar = vm.avatarAssets[detailsProfile.name],
+            state = s.botDetails,
+            status = status,
+            routines = remember(s.cronJobs, detailsProfile.name) { com.nousresearch.hermesmobile.data.BotDetails.routines(s.cronJobs, detailsProfile.name) },
+            cards = if (s.kanbanAvailable) remember(s.kanbanSnapshot, detailsProfile.name) {
+                com.nousresearch.hermesmobile.data.BotDetails.cards(s.kanbanSnapshot, detailsProfile.name)
+            } else null,
+            quiet = quiet,
+            actions = com.nousresearch.hermesmobile.ui.screens.BotDetailsActions(
+                onBack = vm::closeBotDetails,
+                onEdit = { vm.editBot(detailsProfile) },
+                onOpenFile = { artifact = it },
+                onRoutine = { job, on -> if (on) vm.resumeCron(job) else vm.pauseCron(job) },
+                onAllRoutines = { vm.switchSection(MainSection.CRON) },
+                onOpenBoard = { vm.switchSection(MainSection.KANBAN) },
+                onQuiet = { on ->
+                    com.nousresearch.hermesmobile.push.PushDelivery.setQuietBot(context, connection, detailsProfile.name, on)
+                    quiet = on
+                },
+                onStartFresh = vm::startFreshWithBot
+            )
+        )
+    } else
     ChatScreen(
         profiles = s.profiles,
         sessions = s.sessions,
@@ -653,7 +695,7 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         onMenu = onMenu,
         listHeader = listHeader,
         botAvatars = vm.avatarAssets,
-        onBotDetails = vm::editBot,
+        onBotDetails = vm::openBotDetails,
         approvalCards = s.approvalCards,
         onApproval = vm::answerInlineApproval,
         routines = com.nousresearch.hermesmobile.ui.screens.RoutineActions(
@@ -674,7 +716,7 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         )
     )
     }
-    // A bot's chat header opens that bot's editor (Bot details comes in a later phase), so it renders here too.
+    // The bot header's avatar, here too (Bot details and the editor render from this subtree).
     if (chat != null) {
         val botProfile = remember(chat.profile, chat.storedSessionId, chat.botChat, s.profiles) { botChatProfile(chat, s.profiles) }
         if (botProfile != null) LaunchedEffect(botProfile.name, botProfile.hasAvatar) { vm.ensureAvatar(botProfile) }

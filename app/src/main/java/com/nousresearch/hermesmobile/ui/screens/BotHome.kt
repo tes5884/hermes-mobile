@@ -232,7 +232,9 @@ private fun StatusLine(status: BotHome.Status?, offlineLabel: String?, big: Bool
             Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
             Spacer(Modifier.width(7.dp))
         }
-        Text(text, style = style, color = color, fontWeight = weight, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // What a bot is working on gets two lines (one cut it to "Working on: To…"); every other status keeps one.
+        Text(text, style = style, color = color, fontWeight = weight,
+            maxLines = if (offlineLabel == null && status?.kind == BotHome.Kind.WORKING) 2 else 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
