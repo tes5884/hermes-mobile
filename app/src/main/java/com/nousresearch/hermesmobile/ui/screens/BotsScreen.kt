@@ -11,7 +11,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -57,6 +56,8 @@ fun BotsScreen(
     onCreateGroup: (String, Set<String>) -> Unit,
     onOpenGroup: (GroupRoom) -> Unit,
     onCloseGroup: () -> Unit,
+    channelsOpen: Boolean,
+    onShowChannels: (Boolean) -> Unit,
     onSendGroup: (String) -> Unit,
     onReplyGroupThread: (String?) -> Unit,
     onRenameGroup: (String) -> Unit,
@@ -70,8 +71,9 @@ fun BotsScreen(
 ) {
     var create by remember { mutableStateOf(false) }
     var deleteCandidate by remember { mutableStateOf<HermesProfile?>(null) }
-    // "All channels" / "New channel" from home: the rooms list with its create button, until back.
-    var channels by rememberSaveable { mutableStateOf(false) }
+    // "All channels" / "New channel" from home: the rooms list with its create button, until back. Held by the view
+    // model, so opening it is a navigation like any other (a waiting "Talk to …" note is dropped, an open in flight superseded).
+    val channels = channelsOpen
     val allBots = remember(routedBots) { routedBots.filter { it.profile.isBot } }
 
     if (activeGroup != null) {
@@ -84,11 +86,11 @@ fun BotsScreen(
     }
 
     if (channels) {
-        androidx.activity.compose.BackHandler { channels = false }
+        androidx.activity.compose.BackHandler { onShowChannels(false) }
         Column(Modifier.fillMaxSize()) {
             HermesTopBar(
                 stringResource(R.string.botapp_channels),
-                leading = { IconButton(onClick = { channels = false }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.botapp_back_to_bots)) } }
+                leading = { IconButton(onClick = { onShowChannels(false) }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.botapp_back_to_bots)) } }
             )
             DashedDivider(color = MaterialTheme.hermes.line)
             GroupsPanel(
@@ -123,7 +125,7 @@ fun BotsScreen(
                 onTogglePin = { onSetPinned(it, !it.botPinned) },
                 onCreateBot = { create = true },
                 onOpenChannel = onOpenGroup,
-                onAllChannels = { channels = true; onRefreshGroups() },
+                onAllChannels = { onShowChannels(true) },
                 onTalk = onTalk,
                 onEnsureAvatar = onEnsureAvatar
             ),

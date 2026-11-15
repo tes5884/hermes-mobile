@@ -72,6 +72,13 @@ class InlineApprovalRouter<R>(
         return Moves(toCards, toDialog)
     }
 
+    /** The connection these requests came from ended: every card and held request is dead (none is answerable). */
+    fun reset() {
+        cards.clear()
+        held.clear()
+        opening = false
+    }
+
     /** The user answered a card: the request, if it is still waiting as a card. */
     fun answer(requestId: String): R? = cards.remove(requestId)
 
