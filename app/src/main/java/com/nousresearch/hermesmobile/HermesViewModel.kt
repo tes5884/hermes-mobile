@@ -132,6 +132,8 @@ data class HermesUiState(
     val modelOptionsLoading: Boolean = false,
     val interaction: ServerInteraction? = null,
     val interactionQueue: List<ServerInteraction> = emptyList(),
+    /** Approval cards inline in the open bot chat: pending ones (answered here) and the ones answered on this phone. */
+    val approvalCards: List<com.nousresearch.hermesmobile.data.ApprovalCards.Card> = emptyList(),
     val telegramOnboarding: TelegramOnboarding? = null,
     val botEditor: BotProfileConfig? = null,
     val botEditorLoadingProfile: String? = null,
@@ -712,6 +714,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             ?.takeIf { com.nousresearch.hermesmobile.ui.screens.botChatProfile(it, uiState.profiles) != null }?.let { START_SECTION }
         handOffQueue()
         persistCurrentComposerNow()
+        clearInlineApprovals()
         uiState.activeChat?.runtimeSessionId?.let(sessionModelPins::remove)
         pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         navigationGeneration += 1
@@ -2870,6 +2873,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         rememberChatOrigin()
         val generation = ++navigationGeneration
         resetStream()
+        beginChatOpen()
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null)
             runCatching { openStoredChat(repo, session) }
@@ -2897,9 +2901,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }
                     updateSessionLocal(session.copy(unread = false))
                     markChatSeen(chat.storedSessionId)
+                    adoptInlineApprovals()
                 }
                 .onFailure {
-                    if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
+                    if (generation == navigationGeneration) { uiState = uiState.copy(loading = false, error = it.message); adoptInlineApprovals() }
                 }
         }
     }
@@ -2933,6 +2938,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         // Held before the open starts, so even an open that fails at once settles (discards) it.
         if (talk != null) pendingTalk.hold(profile.name, generation, connection, talk)
         resetStream()
+        beginChatOpen()
         viewModelScope.launch {
             uiState = uiState.copy(
                 loading = true,
@@ -2956,13 +2962,14 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         )
                         loadChatEnhancements(chat.copy(title = profile.label))
                         markChatSeen(chat.storedSessionId)
+                        adoptInlineApprovals()
                     }
                     // Only this very open, still current, on the same connection, sends the note it was started for.
                     pendingTalk.settle(generation, profile.name, connection, current && uiState.activeConnectionId.orEmpty() == connection)
                         ?.let { (file, ms) -> sendChatVoiceNote(file, ms) }
                 }
                 .onFailure {
-                    if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
+                    if (generation == navigationGeneration) { uiState = uiState.copy(loading = false, error = it.message); adoptInlineApprovals() }
                     pendingTalk.settle(generation, profile.name, connection, current = false)
                 }
         }
@@ -3096,6 +3103,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             loadingOlderMessages = false
                         )
                         loadChatEnhancements(chat.copy(title = profile.label))
+                        adoptInlineApprovals()
                     } else {
                         uiState = uiState.copy(loading = false, snackbar = string(R.string.i18n_vm_bot_created, profile.label))
                     }
@@ -4200,6 +4208,79 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         completeInteraction(interaction.requestId)
     }
 
+    // ---- Inline approval cards (bot chats) -------------------------------------------------------------------
+    private val approvalStore by lazy { com.nousresearch.hermesmobile.data.ApprovalCardStore(getApplication()) }
+    /** Open approval requests shown as cards in the open bot chat, by request id. */
+    private val inlineRequests = mutableMapOf<String, ServerInteraction>()
+    /** Approvals that arrived while a chat was opening (resume replays open requests before the chat is on screen). */
+    private val heldApprovals = mutableListOf<ServerInteraction>()
+    private var chatOpening = false
+
+    /** An approval belongs inline when it is for the bot chat on screen; anything else keeps the dialog. */
+    private fun inlineApprovalFor(request: ServerInteraction, chat: ActiveChat?): Boolean {
+        if (request.method != "approval" || chat == null || chat.readOnly) return false
+        if (com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, uiState.profiles) == null) return false
+        val sid = request.params.optString("session_id")
+        return sid.isNotBlank() && (sid == chat.runtimeSessionId || sid == chat.storedSessionId)
+    }
+
+    private fun showInlineApproval(request: ServerInteraction) {
+        inlineRequests[request.requestId] = request
+        val card = com.nousresearch.hermesmobile.data.ApprovalCards.fromRequest(request.requestId, request.params, System.currentTimeMillis())
+        uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.upsert(uiState.approvalCards, card))
+    }
+
+    /** The open chat changed: load its answered cards, then pull its approvals out of the dialog (and the held ones) into it. */
+    private fun adoptInlineApprovals() {
+        chatOpening = false
+        chatOpeningJob?.cancel()
+        val chat = uiState.activeChat
+        // Requests of a chat no longer on screen stay open on the server; that chat replays them when it opens again.
+        inlineRequests.values.removeAll { !inlineApprovalFor(it, chat) }
+        val stored = chat?.let { approvalStore.load(it.profile, it.storedSessionId) }.orEmpty()
+        val keepPending = uiState.approvalCards.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING && it.requestId in inlineRequests }
+        uiState = uiState.copy(approvalCards = (stored + keepPending).sortedBy { it.createdAtMs })
+        val held = heldApprovals.toList().also { heldApprovals.clear() }
+        val queued = listOfNotNull(uiState.interaction) + uiState.interactionQueue
+        (queued + held).filter { inlineApprovalFor(it, chat) }.forEach { request ->
+            completeInteraction(request.requestId)
+            showInlineApproval(request)
+        }
+        held.filterNot { inlineApprovalFor(it, chat) }.forEach(::enqueueInteraction)
+    }
+
+    private var chatOpeningJob: Job? = null
+
+    /** A chat is about to open (or re-resume): hold its replayed approvals until it is on screen, 15 s at most. */
+    private fun beginChatOpen() {
+        chatOpening = true
+        chatOpeningJob?.cancel()
+        chatOpeningJob = viewModelScope.launch { delay(15_000); if (chatOpening) adoptInlineApprovals() }
+    }
+
+    /** Leaving a bot chat: its open requests stay open on the server (the chat replays them when it opens again). */
+    private fun clearInlineApprovals() {
+        inlineRequests.clear()
+        uiState = uiState.copy(approvalCards = emptyList())
+    }
+
+    fun answerInlineApproval(requestId: String, choice: String) {
+        if (choice !in setOf("once", "always", "deny")) return
+        // "Always" only where Hermes offered it on this request.
+        if (choice == "always" && uiState.approvalCards.none { it.requestId == requestId && it.allowAlways }) return
+        val request = inlineRequests.remove(requestId) ?: return
+        repository?.gateway?.respond(request.requestId, JSONObject().put("choice", choice))
+        val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(uiState.approvalCards, requestId, choice, System.currentTimeMillis())
+        uiState = uiState.copy(approvalCards = cards)
+        uiState.activeChat?.let { approvalStore.save(it.profile, it.storedSessionId, cards) }
+    }
+
+    private fun withdrawInlineApproval(requestId: String) {
+        heldApprovals.removeAll { it.requestId == requestId }
+        if (inlineRequests.remove(requestId) == null) return
+        uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.withdraw(uiState.approvalCards, requestId))
+    }
+
     private fun enqueueInteraction(request: ServerInteraction) {
         val current = uiState.interaction
         if (current?.requestId == request.requestId ||
@@ -4276,13 +4357,14 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 if (transport == transportGeneration) refreshSessions()
                 return@launch
             }
+            beginChatOpen()
             runCatching { repo.resumeSession(storedId, current.profile, current.title) }
                 .onSuccess { resumed ->
                     val foreground = uiState.activeChat
                     if (transport == transportGeneration && repository === repo && generation == navigationGeneration && foreground?.storedSessionId == storedId) {
                         resetStream(resumed.streamingText)
                         uiState = uiState.copy(
-                            activeChat = resumed.copy(title = current.title, streamingText = "", model = sessionModelPins[current.runtimeSessionId]?.model ?: resumed.model, provider = sessionModelPins[current.runtimeSessionId]?.provider ?: resumed.provider, reasoningEffort = sessionModelPins[current.runtimeSessionId]?.reasoning ?: resumed.reasoningEffort),
+                            activeChat = resumed.copy(title = current.title, botChat = current.botChat, streamingText = "", model = sessionModelPins[current.runtimeSessionId]?.model ?: resumed.model, provider = sessionModelPins[current.runtimeSessionId]?.provider ?: resumed.provider, reasoningEffort = sessionModelPins[current.runtimeSessionId]?.reasoning ?: resumed.reasoningEffort),
                             tools = emptyList()
                         )
                         sessionModelPins.remove(current.runtimeSessionId)?.let { pin ->
@@ -4296,6 +4378,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }
                 }
                 .onFailure { if (transport == transportGeneration && generation == navigationGeneration && repository === repo && uiState.connectionState == GatewayConnectionState.CONNECTED) uiState = uiState.copy(error = it.message) }
+            if (transport == transportGeneration) adoptInlineApprovals()
             if (transport == transportGeneration) refreshSessions()
         }
     }
@@ -4305,7 +4388,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     override fun onServerRequest(request: ServerInteraction) {
         viewModelScope.launch(Dispatchers.Main.immediate) {
             when (request.method) {
-                "approval", "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
+                "approval" -> when {
+                    inlineApprovalFor(request, uiState.activeChat) -> showInlineApproval(request)
+                    // A chat is opening: its replayed open requests arrive before it is on screen; sort them after.
+                    chatOpening -> heldApprovals += request
+                    else -> enqueueInteraction(request)
+                }
+                "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
                     enqueueInteraction(request)
                 else ->
                     repository?.gateway?.reject(
@@ -4347,7 +4436,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     handleLiveStatus(type, payload)
                 "request.cancel" -> {
                     val id = payload.optString("id")
-                    if (id.isNotBlank()) completeInteraction(id)
+                    if (id.isNotBlank()) {
+                        completeInteraction(id)
+                        withdrawInlineApproval(id)
+                    }
                 }
                 "session.info" -> {
                     applyUsageEvent(payload)

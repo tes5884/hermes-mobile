@@ -1,0 +1,14 @@
+<resources>
+    <string name="approval_needs_ok">%s necesita tu OK</string>
+    <string name="approval_approve_once">Aprobar una vez</string>
+    <string name="approval_deny">Denegar</string>
+    <string name="approval_always">Permitir siempre</string>
+    <string name="approval_always_sub">%s no volverá a preguntar por este tipo de comando</string>
+    <string name="approval_always_asks">Este tipo siempre pregunta</string>
+    <string name="approval_details">Detalles</string>
+    <string name="approval_hide_details">Ocultar detalles</string>
+    <string name="approval_reason">Pregunta porque: %s</string>
+    <string name="approval_done_once">Aprobado una vez</string>
+    <string name="approval_done_always">Permitido siempre</string>
+    <string name="approval_done_denied">Dijiste que no</string>
+</resources>

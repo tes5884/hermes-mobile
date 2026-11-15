@@ -142,6 +142,12 @@ internal fun ChatThread(
             liveTools.map { ChatMessage(role = "tool", content = it.detail, toolName = it.name, live = true, liveStatus = it.status) })
     }
     val displayRows = remember(timeline) { chatDisplayRows(timeline) }
+    // Answered approval cards (kept on this phone), by the key of the row each one follows.
+    val answeredAfter = remember(displayRows, bot?.approvals) {
+        val cards = bot?.approvals.orEmpty()
+        val at = com.nousresearch.hermesmobile.data.ApprovalCards.anchors(cards, displayRows.map { it.epochTime() })
+        cards.filter { (at[it.requestId] ?: -1) >= 0 }.groupBy { displayRows[at.getValue(it.requestId)].key }
+    }
     val entries = remember(displayRows, chat.hasOlderMessages) {
         reverseChatEntries(displayRows, chat.hasOlderMessages) { it.key }
     }
@@ -296,6 +302,10 @@ internal fun ChatThread(
                     }) { entry ->
                         when (entry) {
                             ChatListEntry.Bottom -> Column(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                                // A waiting approval is always at the newest point of the chat.
+                                if (bot != null) bot.approvals.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }.forEach { card ->
+                                    key(card.requestId) { InlineApprovalCard(card, bot.profile.label, { choice -> bot.onApproval(card.requestId, choice) }) }
+                                }
                                 LiveStatusLane(liveStatuses)
                                 ArtifactLane(artifactSuggestions, actions.onOpenArtifact)
                                 QueueLane(
@@ -316,18 +326,24 @@ internal fun ChatThread(
                                 if (loadingOlderMessages) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                                 else TextButton(onClick = actions.onLoadOlderMessages) { Text(stringResource(R.string.ui_bf2424a0ba)) }
                             }
-                            is ChatListEntry.Row -> ChatTranscriptRow(
-                                row = entry.row,
-                                turnEnd = entry.row.key in turnEnds.keys,
-                                canRetry = entry.row.key == turnEnds.retryKey && !chat.running,
-                                readOnly = chat.readOnly,
-                                voice = voice,
-                                onEdit = actions.onEditMessage,
-                                onCopy = copy,
-                                onShare = share,
-                                onRetry = actions.onRetry,
-                                onBranch = actions.onBranch
-                            )
+                            is ChatListEntry.Row -> Column {
+                                ChatTranscriptRow(
+                                    row = entry.row,
+                                    turnEnd = entry.row.key in turnEnds.keys,
+                                    canRetry = entry.row.key == turnEnds.retryKey && !chat.running,
+                                    readOnly = chat.readOnly,
+                                    voice = voice,
+                                    onEdit = actions.onEditMessage,
+                                    onCopy = copy,
+                                    onShare = share,
+                                    onRetry = actions.onRetry,
+                                    onBranch = actions.onBranch
+                                )
+                                // Answered approvals sit under the last message before they were asked.
+                                if (bot != null) answeredAfter[entry.row.key]?.forEach { card ->
+                                    key(card.requestId) { InlineApprovalCard(card, bot.profile.label, { choice -> bot.onApproval(card.requestId, choice) }) }
+                                }
+                            }
                         }
                     }
                 }
@@ -600,7 +616,8 @@ private fun ChatThreadTopBar(
  */
 @Composable
 private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, showBack: Boolean, onBack: () -> Unit) {
-    val needsOk = bot.dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT
+    val needsOk = bot.dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT ||
+        bot.approvals.any { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }
     val working = running || bot.dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING
     val orange = com.nousresearch.hermesmobile.ui.theme.HermesTokens.Orange
     Column {

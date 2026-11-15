@@ -31,12 +31,14 @@ internal fun botChatProfile(chat: ActiveChat, profiles: List<HermesProfile>): He
             (chat.botChat || chat.storedSessionId == p.canonicalSession || chat.storedSessionId == p.canonicalResolvedSession)
     }
 
-/** What the bot header of a bot's chat shows; tapping it opens [onDetails]. */
+/** What the bot header of a bot's chat shows; tapping it opens [onDetails]. Also carries the chat's inline approval cards. */
 internal class BotChatHeader(
     val profile: HermesProfile,
     val avatar: String?,
     val dot: SessionDot,
-    val onDetails: () -> Unit
+    val onDetails: () -> Unit,
+    val approvals: List<ApprovalCards.Card> = emptyList(),
+    val onApproval: (requestId: String, choice: String) -> Unit = { _, _ -> }
 )
 
 @Composable
@@ -110,7 +112,10 @@ fun ChatScreen(
     /** Avatars by profile name, for the bot header of a bot's chat. */
     botAvatars: Map<String, String> = emptyMap(),
     /** The bot header's tap target: that bot's details (its editor until Bot details exists). */
-    onBotDetails: (HermesProfile) -> Unit = {}
+    onBotDetails: (HermesProfile) -> Unit = {},
+    /** Inline approval cards of the open bot chat, and the answer to one (request id, once|always|deny). */
+    approvalCards: List<ApprovalCards.Card> = emptyList(),
+    onApproval: (String, String) -> Unit = { _, _ -> }
 ) {
     var showNew by remember { mutableStateOf(false) }
 
@@ -171,7 +176,8 @@ fun ChatScreen(
         actions = threadActions,
         twoPane = twoPane,
         bot = botChatProfile(chat, profiles)?.let { profile ->
-            BotChatHeader(profile, botAvatars[profile.name], LiveSessions.dotFor(sessionDots, chat.storedSessionId)) { onBotDetails(profile) }
+            BotChatHeader(profile, botAvatars[profile.name], LiveSessions.dotFor(sessionDots, chat.storedSessionId), { onBotDetails(profile) },
+                approvalCards, onApproval)
         }
     )
 

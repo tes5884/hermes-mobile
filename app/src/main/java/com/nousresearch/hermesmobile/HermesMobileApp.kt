@@ -652,6 +652,8 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         listHeader = listHeader,
         botAvatars = vm.avatarAssets,
         onBotDetails = vm::editBot,
+        approvalCards = s.approvalCards,
+        onApproval = vm::answerInlineApproval,
         routines = com.nousresearch.hermesmobile.ui.screens.RoutineActions(
             jobs = s.cronJobs,
             runs = s.cronRuns,
