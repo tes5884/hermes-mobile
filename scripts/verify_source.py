@@ -114,7 +114,8 @@ bot_ui = (ROOT / 'app/src/main/java/com/nousresearch/hermesmobile/ui/screens/Bot
 bot_ui = with_resource_labels(bot_ui)
 bot_editor = (ROOT / 'app/src/main/java/com/nousresearch/hermesmobile/ui/screens/BotEditorDialog.kt').read_text()
 bot_editor = with_resource_labels(bot_editor)
-for required in ('New side chat', 'Edit bot', 'Delete bot', 'botPinned'):
+# Bot-first home (2026-11-15): a bot is one continuous chat, so the roster has no "New side chat" any more.
+for required in ('Edit bot', 'Delete bot', 'botPinned'):
     if required not in bot_ui:
         errors.append(f'Bot roster UI invariant missing: {required}')
 for required in ('SOUL.md', 'Capabilities', 'Filter skills', 'MCP', 'modelProviders'):

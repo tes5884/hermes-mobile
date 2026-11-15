@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -56,47 +57,11 @@ fun HoldMicButton(
     showLockHint: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val latest by rememberUpdatedState(callbacks)
-    val lockPx = with(LocalDensity.current) { 64.dp.toPx() }
     val label = stringResource(R.string.group_voice_note)
     Box(
         modifier.size(44.dp)
             .graphicsLayer { val k = if (recording) 1.3f else 1f; scaleX = k; scaleY = k }
-            .semantics { onClick(label) { if (enabled) latest.onTalkBackToggle(); true } }
-            .pointerInput(enabled, cancelWidthPx) {
-                if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val started = latest.onPress()
-                    if (!started) {
-                        // Permission prompt is up: swallow this press; he holds again after allowing.
-                        do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                        return@awaitEachGesture
-                    }
-                    var locked = false
-                    var cancelled = false
-                    var upAt = down.uptimeMillis
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Main)
-                        val ch = event.changes.firstOrNull { it.id == down.id } ?: break
-                        upAt = ch.uptimeMillis
-                        ch.consume()
-                        if (!ch.pressed) break
-                        val dx = ch.position.x - down.position.x
-                        val dy = ch.position.y - down.position.y
-                        latest.onDrag(dx, dy)
-                        if (VoiceNotes.isCancelDrag(dx, cancelWidthPx)) { cancelled = true; break }
-                        if (VoiceNotes.isLockDrag(dy, lockPx)) { locked = true; latest.onLock(); break }
-                    }
-                    if (locked) {
-                        // Finger can let go now; wait for it so the lift isn't read as a release.
-                        do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                    } else {
-                        latest.onRelease(upAt - down.uptimeMillis, cancelled)
-                        if (cancelled) do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                    }
-                }
-            },
+            .holdToRecord(enabled, cancelWidthPx, callbacks, label),
         contentAlignment = Alignment.Center
     ) {
         Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary, modifier = Modifier.fillMaxSize()) {
@@ -122,6 +87,50 @@ fun HoldMicButton(
             }
         }
     }
+}
+
+/**
+ * The hold-to-record gesture on any surface (the composer's mic, the home's "Talk to …" pill): press starts,
+ * release sends, slide left past [cancelWidthPx]/3 cancels, slide up locks. TalkBack's activate toggles instead.
+ */
+fun Modifier.holdToRecord(enabled: Boolean, cancelWidthPx: Float, callbacks: HoldMicCallbacks, label: String): Modifier = composed {
+    val latest by rememberUpdatedState(callbacks)
+    val lockPx = with(LocalDensity.current) { 64.dp.toPx() }
+    semantics { onClick(label) { if (enabled) latest.onTalkBackToggle(); true } }
+        .pointerInput(enabled, cancelWidthPx) {
+            if (!enabled) return@pointerInput
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val started = latest.onPress()
+                if (!started) {
+                    // Permission prompt is up: swallow this press; he holds again after allowing.
+                    do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                    return@awaitEachGesture
+                }
+                var locked = false
+                var cancelled = false
+                var upAt = down.uptimeMillis
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Main)
+                    val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                    upAt = ch.uptimeMillis
+                    ch.consume()
+                    if (!ch.pressed) break
+                    val dx = ch.position.x - down.position.x
+                    val dy = ch.position.y - down.position.y
+                    latest.onDrag(dx, dy)
+                    if (VoiceNotes.isCancelDrag(dx, cancelWidthPx)) { cancelled = true; break }
+                    if (VoiceNotes.isLockDrag(dy, lockPx)) { locked = true; latest.onLock(); break }
+                }
+                if (locked) {
+                    // Finger can let go now; wait for it so the lift isn't read as a release.
+                    do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                } else {
+                    latest.onRelease(upAt - down.uptimeMillis, cancelled)
+                    if (cancelled) do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                }
+            }
+        }
 }
 
 /** The composer while recording: red dot + timer, live waveform, then the slide-to-cancel hint (or Cancel/Send once locked). */

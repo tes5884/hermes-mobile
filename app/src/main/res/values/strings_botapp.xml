@@ -1,0 +1,31 @@
+<resources>
+    <string name="botapp_title">Bots</string>
+    <plurals name="botapp_summary_need">
+        <item quantity="one">%d needs you</item>
+        <item quantity="other">%d need you</item>
+    </plurals>
+    <plurals name="botapp_summary_working">
+        <item quantity="one">%d working</item>
+        <item quantity="other">%d working</item>
+    </plurals>
+    <plurals name="botapp_summary_idle">
+        <item quantity="one">%d idle</item>
+        <item quantity="other">%d idle</item>
+    </plurals>
+    <string name="botapp_needs_ok">Needs your OK</string>
+    <string name="botapp_working_on">Working on: %s</string>
+    <string name="botapp_idle">Idle</string>
+    <string name="botapp_unread">Unread</string>
+    <string name="botapp_channels">Channels</string>
+    <string name="botapp_new_bot">New bot</string>
+    <string name="botapp_new_channel">New channel</string>
+    <string name="botapp_all_channels">All channels</string>
+    <string name="botapp_talk_to">Talk to %s</string>
+    <string name="botapp_search">Search bots</string>
+    <string name="botapp_menu">Menu and settings</string>
+    <string name="botapp_on_gateway">On %s · tap to switch</string>
+    <string name="botapp_details">Bot details</string>
+    <string name="botapp_show_hidden">Show hidden bots</string>
+    <string name="botapp_hide_hidden">Hide hidden bots</string>
+    <string name="botapp_back_to_bots">Back to bots</string>
+</resources>

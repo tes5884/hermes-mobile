@@ -9,6 +9,14 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Changed
+
+- Bot-first start page: the app opens on the bots (pinned bot on top, departments in a fixed order, channels
+  below) with a one-line status per bot (needs your OK / working on / unread / idle), a "N need you · N working ·
+  N idle" summary and a floating hold-to-talk button for the pinned bot. A bot opens its one continuous chat,
+  whose header is the bot (avatar, role, live status) instead of a session switcher; Home and Chats stay in the
+  side menu.
+
 ## [0.3.0-beta.15] - 2026-10-31
 
 ### Added

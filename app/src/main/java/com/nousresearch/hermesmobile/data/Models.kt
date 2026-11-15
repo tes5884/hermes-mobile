@@ -616,7 +616,9 @@ data class ActiveChat(
     /** A sent message being edited: sending rewinds the chat to it and runs it again, as in Desktop. */
     val editing: EditingTurn? = null,
     /** A transcript opened without resuming it (a Kanban worker's): no runtime session, nothing to send to. */
-    val readOnly: Boolean = false
+    val readOnly: Boolean = false,
+    /** Opened as a bot's one continuous chat (Bot Mode's canonical Bot Chat): bot header, no session switcher. */
+    val botChat: Boolean = false
 )
 
 /**

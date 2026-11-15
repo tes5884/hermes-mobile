@@ -74,7 +74,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
 
         // System back returns to the page visited before, then to Home, the start destination (screens with
         // their own back stack — an open chat, sub-pages — register deeper handlers that win).
-        androidx.activity.compose.BackHandler(enabled = s.section != MainSection.HOME || vm.canNavigateBack) { vm.navigateBack() }
+        androidx.activity.compose.BackHandler(enabled = vm.canNavigateBack) { vm.navigateBack() }
         val wide = LocalWindowInfo.current.containerSize.width / LocalDensity.current.density >= 720f
         var searchOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
         if (searchOpen) SearchPalette(
@@ -174,7 +174,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                     FloatingActionButton(onClick = { vm.newChat() }, containerColor = MaterialTheme.hermes.accentTint,
                         contentColor = MaterialTheme.colorScheme.primary, elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
                         modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)) { Icon(Icons.Outlined.AddComment, stringResource(R.string.ui_db18382a24)) }
-                    listOf(MainSection.HOME to Icons.Default.SpaceDashboard, MainSection.CHAT to Icons.AutoMirrored.Filled.Chat, MainSection.BOTS to Icons.Default.SmartToy,
+                    listOf(MainSection.BOTS to Icons.Default.SmartToy, MainSection.HOME to Icons.Default.SpaceDashboard, MainSection.CHAT to Icons.AutoMirrored.Filled.Chat,
                         MainSection.CAPABILITIES to Icons.Default.Psychology, MainSection.FILES to Icons.Default.FolderOpen,
                         MainSection.CRON to Icons.Default.Schedule, MainSection.MORE to Icons.Default.Settings).forEach { (section, icon) ->
                         NavigationRailItem(selected = s.section == section, onClick = { if(section == MainSection.CHAT) vm.closeActiveChat() else vm.switchSection(section) },
@@ -233,7 +233,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onSwitchConnection = vm::switchConnection,
                         onOpen = vm::openBot,
                         onCreate = vm::createBot,
-                        onNewChat = vm::newBotSideChat,
+                        onTalk = vm::talkToBot,
                         onEdit = vm::editBot,
                         onSaveEditor = vm::saveBotEditor,
                         onSetPinned = vm::setBotPinned,
@@ -650,6 +650,8 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         onBack = vm::closeActiveChat,
         onMenu = onMenu,
         listHeader = listHeader,
+        botAvatars = vm.avatarAssets,
+        onBotDetails = vm::editBot,
         routines = com.nousresearch.hermesmobile.ui.screens.RoutineActions(
             jobs = s.cronJobs,
             runs = s.cronRuns,
@@ -668,6 +670,16 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         )
     )
     }
+    // A bot's chat header opens that bot's editor (Bot details comes in a later phase), so it renders here too.
+    if (chat != null) {
+        val botProfile = remember(chat.profile, chat.storedSessionId, chat.botChat, s.profiles) { botChatProfile(chat, s.profiles) }
+        if (botProfile != null) LaunchedEffect(botProfile.name, botProfile.hasAvatar) { vm.ensureAvatar(botProfile) }
+    }
+    s.botEditor?.let {
+        BotEditorDialog(config = it, saving = s.botEditorSaving, onDismiss = vm::closeBotEditor, onSave = vm::saveBotEditor,
+            sectionOptions = remember(s.profiles) { s.profiles.filter { p -> p.isBot }.map { p -> p.botSection }.filter { n -> n.isNotBlank() }.distinct().sortedBy { n -> n.lowercase() } })
+    }
+    if (s.botEditorLoadingProfile != null) LinearProgressIndicator(Modifier.fillMaxWidth())
 }
 
 @Composable

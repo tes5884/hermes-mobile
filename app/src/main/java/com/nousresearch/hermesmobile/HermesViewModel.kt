@@ -80,8 +80,8 @@ data class HermesUiState(
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: String? = null,
-    // Like Desktop, the app opens on the conversation list; Home stays reachable from the drawer.
-    val section: MainSection = MainSection.HOME,
+    // Bot-first (2026-11-15): the app opens on the bots; Home (dashboard) and Chats stay reachable from the drawer.
+    val section: MainSection = MainSection.BOTS,
     val profiles: List<HermesProfile> = emptyList(),
     val botRoster: List<RoutedBot> = emptyList(),
     val botRosterLoading: Boolean = false,
@@ -210,6 +210,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private val avatarMissing = mutableSetOf<String>()
     private val avatarLoading = mutableSetOf<String>()
     private val avatarCacheOrder = ArrayDeque<String>()
+    private var avatarCacheClearedAt = 0L
+    /** A voice note recorded on the bots page ("Talk to …"): sent once that bot's chat is open. */
+    private var pendingTalk: Triple<String, java.io.File, Long>? = null
 
     private val streamBuffer = StringBuilder()
     private var streamFlushJob: Job? = null
@@ -703,7 +706,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun closeActiveChat() {
-        val back = chatReturnSection
+        // A bot's one chat always closes back to the bots, even when a push or a restored page opened it.
+        val back = chatReturnSection ?: uiState.activeChat
+            ?.takeIf { com.nousresearch.hermesmobile.ui.screens.botChatProfile(it, uiState.profiles) != null }?.let { START_SECTION }
         handOffQueue()
         persistCurrentComposerNow()
         uiState.activeChat?.runtimeSessionId?.let(sessionModelPins::remove)
@@ -734,17 +739,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     /** The pages visited before this one, so system back returns to the previous page rather than to Home. */
     private val sectionHistory = ArrayDeque<MainSection>()
-    val canNavigateBack: Boolean get() = sectionHistory.isNotEmpty() || uiState.section != MainSection.HOME
+    val canNavigateBack: Boolean get() = sectionHistory.isNotEmpty() || uiState.section != START_SECTION
 
-    /** System back: the previous page, or Home (the start destination) once there is none. */
+    /** System back: the previous page, or the bots (the start destination) once there is none. */
     fun navigateBack() {
-        val previous = sectionHistory.removeLastOrNull() ?: MainSection.HOME.takeIf { uiState.section != MainSection.HOME } ?: return
+        val previous = sectionHistory.removeLastOrNull() ?: START_SECTION.takeIf { uiState.section != START_SECTION } ?: return
         switchSection(previous, record = false)
     }
 
     fun switchSection(section: MainSection, record: Boolean = true) {
         // Kanban is a destination only while the gateway has it for the selected profile.
-        if (section == MainSection.KANBAN && !uiState.kanbanAvailable) return switchSection(MainSection.HOME, record)
+        if (section == MainSection.KANBAN && !uiState.kanbanAvailable) return switchSection(START_SECTION, record)
         if (record && section != uiState.section) {
             sectionHistory.remove(section)
             sectionHistory.addLast(uiState.section)
@@ -761,8 +766,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         when (section) {
             MainSection.BOTS -> {
                 // No asset revision is exposed by profiles.get_asset. Re-entering
-                // Bot Mode is therefore our explicit cross-device cache fence.
-                clearAvatarCache()
+                // Bot Mode is therefore our explicit cross-device cache fence — at most every few minutes, since the
+                // bots page is now the start page and every chat returns to it (clearing each time flashed initials).
+                val now = System.currentTimeMillis()
+                if (now - avatarCacheClearedAt > AVATAR_FENCE_MS) { clearAvatarCache(); avatarCacheClearedAt = now }
                 // The roster is built from the profiles: rebuild it once they (and their latest messages) are in.
                 refreshProfiles(then = ::refreshBotRoster)
                 if (uiState.activeGroup != null) {
@@ -838,7 +845,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 kanbanTaskId = null,
                 kanbanTask = null
             )
-            if (!available && uiState.section == MainSection.KANBAN) switchSection(MainSection.HOME, record = false)
+            if (!available && uiState.section == MainSection.KANBAN) switchSection(START_SECTION, record = false)
             // A board on screen is loaded for the profile that is now selected.
             if (available && uiState.section == MainSection.KANBAN) refreshKanban()
         }
@@ -1857,6 +1864,11 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     refreshing = false,
                     error = null
                 )
+                // The bots page is the start page: its roster and channels are built here on connect, not only on entry.
+                if (uiState.section == MainSection.BOTS && uiState.activeChat == null) {
+                    refreshBotRoster()
+                    if (uiState.activeGroup == null) refreshGroups()
+                }
             }.onFailure {
                 if (generation == refreshGeneration) {
                     uiState = uiState.copy(loading = false, refreshing = false, error = it.message)
@@ -2848,6 +2860,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun openSession(session: HermesSession) {
         val repo = repository ?: return
+        pendingTalk?.let { pendingTalk = null; it.second.delete() }
         if (uiState.activeChat?.storedSessionId != session.id) handOffQueue()
         rememberChatOrigin()
         val generation = ++navigationGeneration
@@ -2905,6 +2918,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun openBot(profile: HermesProfile) {
         val repo = repository ?: return
+        // A "Talk to …" note waits only for its own bot's chat; opening anything else drops it.
+        pendingTalk?.takeIf { it.first != profile.name }?.let { pendingTalk = null; it.second.delete() }
         rememberChatOrigin()
         val generation = ++navigationGeneration
         resetStream()
@@ -2922,7 +2937,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         uiState = uiState.copy(
                             // Switch only now: switching first showed the Chats list while the chat loaded.
                             section = MainSection.CHAT,
-                            activeChat = chat.copy(title = profile.label, streamingText = ""),
+                            activeChat = chat.copy(title = profile.label, streamingText = "", botChat = true),
                             sessionUsage = null,
                             loading = false,
                             tools = emptyList(),
@@ -2930,12 +2945,28 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         )
                         loadChatEnhancements(chat.copy(title = profile.label))
                         markChatSeen(chat.storedSessionId)
+                        pendingTalk?.takeIf { it.first == profile.name }?.let { (_, file, ms) ->
+                            pendingTalk = null
+                            sendChatVoiceNote(file, ms)
+                        }
                     }
                 }
                 .onFailure {
                     if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
+                    pendingTalk?.takeIf { it.first == profile.name }?.let { pendingTalk = null; it.second.delete() }
                 }
         }
+    }
+
+    /**
+     * "Talk to …" on the bots page: the note goes into that bot's one chat, through the same path as a note recorded
+     * in the chat (pending bubble, transcript, audio attachment), once the chat is open.
+     */
+    fun talkToBot(profile: HermesProfile, file: java.io.File, durationMs: Long) {
+        if (repository == null) { file.delete(); return }
+        pendingTalk?.second?.takeIf { it != file }?.delete()
+        pendingTalk = Triple(profile.name, file, durationMs)
+        openBot(profile)
     }
 
     fun loadOlderMessages() {
@@ -3052,7 +3083,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             snackbar = string(R.string.i18n_vm_bot_created, profile.label),
                             section = MainSection.CHAT,
                             selectedProfile = profile.name,
-                            activeChat = chat.copy(title = profile.label, streamingText = ""),
+                            activeChat = chat.copy(title = profile.label, streamingText = "", botChat = true),
                             tools = emptyList(),
                             loadingOlderMessages = false
                         )
@@ -4586,6 +4617,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         private const val LIVE_SESSIONS_POLL_MS = 4_000L
         /** The gateway's refusal of `session.resume` for a Kanban worker's transcript (tui_gateway `_resume_guard`). */
         private const val KANBAN_RESUME_REFUSED = 4132
+        /** The page the app opens on and back returns to: the bots (bot-first home). */
+        val START_SECTION = MainSection.BOTS
+        /** Avatars are re-fetched on entering the bots page at most this often. */
+        private const val AVATAR_FENCE_MS = 5 * 60_000L
         private const val NAV_SECTION = "nav.section"
         private const val NAV_SESSION = "nav.session"
         private const val NAV_PROFILE = "nav.profile"

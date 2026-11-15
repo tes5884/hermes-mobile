@@ -1,0 +1,34 @@
+<resources>
+    <string name="botapp_title">Bots</string>
+    <plurals name="botapp_summary_need">
+        <item quantity="one">%d te necesita</item>
+        <item quantity="many">%d te necesitan</item>
+        <item quantity="other">%d te necesitan</item>
+    </plurals>
+    <plurals name="botapp_summary_working">
+        <item quantity="one">%d trabajando</item>
+        <item quantity="many">%d trabajando</item>
+        <item quantity="other">%d trabajando</item>
+    </plurals>
+    <plurals name="botapp_summary_idle">
+        <item quantity="one">%d libre</item>
+        <item quantity="many">%d libres</item>
+        <item quantity="other">%d libres</item>
+    </plurals>
+    <string name="botapp_needs_ok">Necesita tu OK</string>
+    <string name="botapp_working_on">Trabajando en: %s</string>
+    <string name="botapp_idle">Libre</string>
+    <string name="botapp_unread">Sin leer</string>
+    <string name="botapp_channels">Canales</string>
+    <string name="botapp_new_bot">Nuevo bot</string>
+    <string name="botapp_new_channel">Nuevo canal</string>
+    <string name="botapp_all_channels">Todos los canales</string>
+    <string name="botapp_talk_to">Hablar con %s</string>
+    <string name="botapp_search">Buscar bots</string>
+    <string name="botapp_menu">Menú y ajustes</string>
+    <string name="botapp_on_gateway">En %s · toca para cambiar</string>
+    <string name="botapp_details">Detalles del bot</string>
+    <string name="botapp_show_hidden">Mostrar bots ocultos</string>
+    <string name="botapp_hide_hidden">Ocultar bots ocultos</string>
+    <string name="botapp_back_to_bots">Volver a los bots</string>
+</resources>
