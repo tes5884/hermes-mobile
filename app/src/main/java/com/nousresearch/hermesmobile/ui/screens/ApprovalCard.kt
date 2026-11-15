@@ -92,7 +92,11 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
                 Spacer(Modifier.height(4.dp))
                 Text(card.effect, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (card.command.isNotBlank() || card.reason.isNotBlank()) {
+            // Several steps, or a command the phone can't name as one action: Approve covers every part, so all of it
+            // is on the card, every line, never folded (Shomer, P4). Answered cards keep it under Details.
+            val upFront = pending && card.commandUpFront
+            if (upFront) ApprovalFullCommand(card.command, Modifier.padding(top = 8.dp))
+            if ((card.command.isNotBlank() && !upFront) || card.reason.isNotBlank()) {
                 Row(
                     Modifier.padding(top = 6.dp).clip(RoundedCornerShape(8.dp)).clickable { details = !details }.padding(vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -102,7 +106,7 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
                     Icon(if (details) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (details) {
-                    if (card.command.isNotBlank()) CollapsibleCommand(card.command)
+                    if (card.command.isNotBlank() && !upFront) CollapsibleCommand(card.command)
                     if (card.reason.isNotBlank()) Text(stringResource(R.string.approval_reason, card.reason), Modifier.padding(top = 6.dp),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -142,6 +146,20 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
     }
 }
 
+/** The whole command as Approve will run it: monospace, every line, no ellipsis and no fold. */
+@Composable
+private fun ApprovalFullCommand(command: String, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.hermes.codeBlock,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, MaterialTheme.hermes.codeBlockBorder),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Text(command, Modifier.padding(12.dp), fontFamily = com.nousresearch.hermesmobile.ui.theme.HermesMono,
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
 /**
  * A command-made headline in plain words (\"Delete the folder “test” in …/ezra/scratch\"). Where the command gives no
  * place, the sentence without one is used.
@@ -171,7 +189,7 @@ internal fun approvalHeadline(s: com.nousresearch.hermesmobile.data.CommandSumma
         SummaryKind.STOP_PROCESS -> named(R.string.approval_h_stop_process, R.string.approval_h_stop_process_any)
         SummaryKind.CHANGE_PERMISSIONS -> pick(R.string.approval_h_permissions_in, R.string.approval_h_permissions)
         SummaryKind.CHANGE_OWNER -> pick(R.string.approval_h_owner_in, R.string.approval_h_owner)
-        SummaryKind.MOVE -> if (place.isNotBlank()) stringResource(R.string.approval_h_move, subject, place) else stringResource(R.string.approval_h_run, subject)
+        SummaryKind.MOVE -> if (place.isNotBlank()) stringResource(R.string.approval_h_move, subject, place) else stringResource(R.string.approval_h_run)
         SummaryKind.WRITE_DISK -> named(R.string.approval_h_write_disk, R.string.approval_h_write_disk_any)
         SummaryKind.FORMAT_DISK -> named(R.string.approval_h_format_disk, R.string.approval_h_format_disk_any)
         SummaryKind.RUN_REMOTE_SCRIPT -> if (place.isNotBlank()) stringResource(R.string.approval_h_remote_script_from, place) else stringResource(R.string.approval_h_remote_script)
@@ -179,7 +197,9 @@ internal fun approvalHeadline(s: com.nousresearch.hermesmobile.data.CommandSumma
         SummaryKind.OVERWRITE_FILE -> pick(R.string.approval_h_overwrite_file_in, R.string.approval_h_overwrite_file)
         SummaryKind.REBOOT -> stringResource(R.string.approval_h_reboot)
         SummaryKind.SHUTDOWN -> stringResource(R.string.approval_h_shutdown)
-        SummaryKind.RUN -> stringResource(R.string.approval_h_run, subject)
+        // The command itself is under the headline (InlineApprovalCard), untruncated: these never stand in for it.
+        SummaryKind.RUN -> stringResource(R.string.approval_h_run)
+        SummaryKind.SEVERAL -> stringResource(R.string.approval_h_several, subject)
     }
 }
 

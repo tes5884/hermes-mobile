@@ -58,5 +58,6 @@
     <string name="approval_h_overwrite_file">Sobrescribir “%s”</string>
     <string name="approval_h_reboot">Reiniciar este equipo</string>
     <string name="approval_h_shutdown">Apagar este equipo</string>
-    <string name="approval_h_run">Ejecutar: %s</string>
+    <string name="approval_h_run">Ejecutar este comando</string>
+    <string name="approval_h_several">Ejecutar estos %s comandos, todos</string>
 </resources>

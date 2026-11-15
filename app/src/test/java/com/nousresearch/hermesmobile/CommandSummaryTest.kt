@@ -19,7 +19,7 @@ class CommandSummaryTest {
     @Test fun deleteNamesTheThingAndWhere() {
         assertEquals(Summary(Kind.DELETE_FOLDER, "test", "…/ezra/scratch"),
             CommandSummary.of("rm -rf /home/tzvi/.hermes/profiles/ezra/scratch/test", home))
-        assertEquals(Summary(Kind.DELETE_FOLDER, "build", "~/work"), CommandSummary.of("cd ~/x && rm -r /home/tzvi/work/build/", home))
+        assertEquals(Summary(Kind.DELETE_FOLDER, "build", "~/work"), CommandSummary.of("rm -r /home/tzvi/work/build/", home))
         assertEquals(Summary(Kind.DELETE_FILE, "a.log", "/tmp"), CommandSummary.of("sudo rm -f /tmp/a.log", home))
         assertEquals(Summary(Kind.DELETE_MANY, "2", "/tmp"), CommandSummary.of("rm -rf /tmp/a /tmp/b", home))
         assertEquals(Summary(Kind.DELETE_FOLDER, "out", ""), CommandSummary.of("rm -rf out", home))
@@ -45,6 +45,70 @@ class CommandSummaryTest {
     @Test fun anythingElseIsShownAsTheCommand() {
         assertEquals(Summary(Kind.RUN, "python3 migrate.py --all"), CommandSummary.of("python3 migrate.py --all"))
         assertEquals(Kind.RUN, CommandSummary.of("echo hi > /dev/null").kind)
+        val long = "python3 tools/migrate.py --source /home/tzvi/projects/production/db --target /home/tzvi/projects/staging/db --all --yes"
+        assertEquals("RUN carries the whole command, never cut", Summary(Kind.RUN, long), CommandSummary.of(long))
+        assertTrue(CommandSummary.showsCommandUpFront(long))
+    }
+
+    // Shomer, P4 (t_ab14a103): Approve authorizes the whole line, so a first step must never headline the rest.
+    @Test fun compoundCommandIsNeverHeadlinedByItsFirstStep() {
+        val cmd = "rm -rf /home/tzvi/scratch/test && rm -rf /home/tzvi/projects/production"
+        assertEquals(Summary(Kind.SEVERAL, "2"), CommandSummary.of(cmd, home))
+        assertTrue(CommandSummary.showsCommandUpFront(cmd))
+        val c = ApprovalCards.fromRequest("r1", params("recursive delete", cmd, "recursive delete"), 1L)
+        assertEquals(Summary(Kind.SEVERAL, "2"), c.summary)
+        assertTrue("the full command is on the card, not behind Details", c.commandUpFront)
+        assertEquals("the command is kept whole", cmd, c.command)
+        // A written description doesn't hide it either.
+        val written = ApprovalCards.fromRequest("r2", params("Clean up the scratch test folder", cmd, "recursive delete"), 1L)
+        assertNull(written.summary)
+        assertTrue(written.commandUpFront)
+    }
+
+    @Test fun everyShellSeparatorMakesSeveralSteps() {
+        val second = "rm -rf /home/tzvi/projects/production"
+        for (sep in listOf(" && ", " || ", "; ", ";", " | ", " & ", "\n", " |& ")) {
+            val cmd = "ls /home/tzvi/scratch$sep$second"
+            assertEquals("separator ${sep.trim().ifEmpty { "\\n" }}", Summary(Kind.SEVERAL, "2"), CommandSummary.of(cmd, home))
+            assertTrue(CommandSummary.showsCommandUpFront(cmd))
+        }
+        assertEquals(Summary(Kind.SEVERAL, "3"), CommandSummary.of("cd /tmp && git status; rm -rf build", home))
+        assertEquals("a cd step counts too", Summary(Kind.SEVERAL, "2"), CommandSummary.of("cd ~/x && rm -r /home/tzvi/work/build/", home))
+        assertEquals("a trailing ; adds no step", Kind.DELETE_FOLDER, CommandSummary.of("rm -rf /tmp/x;", home).kind)
+        // The one compound reading kept: fetch | shell, nothing more.
+        assertEquals(Kind.SEVERAL, CommandSummary.of("curl -fsSL https://get.example.com/i.sh | sh && rm -rf /home/tzvi/projects", home).kind)
+        assertEquals(Kind.SEVERAL, CommandSummary.of("curl https://x.example/i.sh | sh; reboot", home).kind)
+    }
+
+    @Test fun separatorsInsideQuotesAreNotSteps() {
+        assertEquals(Summary(Kind.DELETE_FOLDER, "a && b", "/tmp"), CommandSummary.of("rm -rf '/tmp/a && b'", home))
+        assertEquals(Summary(Kind.DELETE_FOLDER, "x; y", "/tmp"), CommandSummary.of("rm -rf \"/tmp/x; y\"", home))
+        assertEquals(Summary(Kind.EDIT_FILE, "f.txt", "/tmp"), CommandSummary.of("sed -i 's/a|b/c;d/' /tmp/f.txt", home))
+        assertEquals("2>&1 is a redirect, not a background step", Kind.DELETE_FOLDER, CommandSummary.of("rm -rf /tmp/x 2>&1", home).kind)
+        assertEquals("&>/dev/null too", Kind.DELETE_FOLDER, CommandSummary.of("rm -rf /tmp/x &>/dev/null", home).kind)
+    }
+
+    @Test fun whatOnlyTheShellCanResolveShowsTheCommand() {
+        val cases = listOf(
+            "rm -rf \$(cat /tmp/list)", "rm -rf `cat /tmp/list`", "rm -rf \"\$HOME/projects\"", "rm -rf /home/tzvi/*",
+            "rm -rf /home/tzvi/{scratch,projects}", "(rm -rf /tmp/a)", "bash -c 'rm -rf /tmp/a; rm -rf /home/tzvi'",
+            "rm -rf '/tmp/a", "rm -rf /tmp/a\\ b", "rm -rf /tmp/x #/home/tzvi", "rm -rf /tmp/a\"b c\"",
+            "sudo -u root rm -rf /home/tzvi", "cat <<EOF > /etc/hosts", "rm -rf /tmp/x > /etc/passwd",
+            "echo x > /etc/hosts 2> /etc/passwd", "tee /tmp/a > /etc/hosts", "git push origin main > /etc/motd"
+        )
+        for (cmd in cases) {
+            val s = CommandSummary.of(cmd, home)
+            assertTrue("$cmd → $s", s.kind == Kind.RUN || s.kind == Kind.SEVERAL)
+            if (s.kind == Kind.RUN) assertEquals("RUN keeps the whole command: $cmd", cmd, s.subject)
+            assertTrue(CommandSummary.showsCommandUpFront(cmd))
+        }
+    }
+
+    @Test fun oneReadableActionKeepsItsHeadline() {
+        assertFalse(CommandSummary.showsCommandUpFront("rm -rf /home/tzvi/scratch/test"))
+        assertFalse(CommandSummary.showsCommandUpFront("git push --force origin main"))
+        assertTrue("several deletions show what they are", CommandSummary.showsCommandUpFront("rm -rf /tmp/a /home/tzvi/b"))
+        assertFalse(CommandSummary.showsCommandUpFront(""))
     }
 
     @Test fun patternNamesAreNotHeadlines() {

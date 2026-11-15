@@ -11,7 +11,7 @@ object CommandSummary {
         DELETE_FOLDER, DELETE_FILE, DELETE_MANY, FORCE_PUSH, PUSH, DISCARD_CHANGES, DELETE_UNTRACKED,
         RESTART_SERVICE, STOP_SERVICE, START_SERVICE, DISABLE_SERVICE, RESTART_CONTAINER, STOP_CONTAINER, REMOVE_CONTAINER,
         STOP_PROCESS, CHANGE_PERMISSIONS, CHANGE_OWNER, MOVE, WRITE_DISK, FORMAT_DISK, RUN_REMOTE_SCRIPT, EDIT_FILE,
-        OVERWRITE_FILE, REBOOT, SHUTDOWN, RUN
+        OVERWRITE_FILE, REBOOT, SHUTDOWN, RUN, SEVERAL
     }
 
     /** [subject] = what it acts on (a name, a count, a branch); [place] = where (a short folder, a remote, a host). */
@@ -28,23 +28,94 @@ object CommandSummary {
         return d.first().isLowerCase() && '\n' !in d && d.length <= 80
     }
 
+    /**
+     * What the approval is for. A plain-words reading (a [Kind] other than [Kind.RUN]/[Kind.SEVERAL]) is given only
+     * for ONE simple command, because Approve authorizes the whole command line (Shomer, P4): two or more steps
+     * (`&&`, `||`, `;`, `|`, `&`, a newline, outside quotes) are [Kind.SEVERAL] with the step count, and anything the
+     * phone cannot read with certainty (substitution, globs, braces, subshells, here-docs, escapes, unbalanced quotes,
+     * wrappers like `sudo -u`, a redirect beside the action) is [Kind.RUN] with the full, untruncated command. Both
+     * make the card show the exact command up front ([showsCommandUpFront]). The one compound reading kept is
+     * `curl|wget … | sh`, exactly those two steps and nothing else.
+     */
     fun of(command: String, home: String = ""): Summary {
-        val segments = split(command)
-        // The step that matters: the first segment the patterns would care about, else the first real one.
-        val words = segments.firstOrNull { classify(it, home) != null } ?: segments.firstOrNull()
-            ?: return Summary(Kind.RUN, command.lineSequence().firstOrNull().orEmpty().trim().take(80))
-        if (Regex("""\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b""").containsMatchIn(command)) {
-            val host = Regex("""https?://([^/\s'"]+)""").find(command)?.groupValues?.get(1).orEmpty()
-            return Summary(Kind.RUN_REMOTE_SCRIPT, place = host)
-        }
-        return classify(words, home) ?: Summary(Kind.RUN, words.joinToString(" ").take(80))
+        val full = command.trim()
+        val shape = shape(full)
+        if (!shape.balanced || shape.steps.isEmpty()) return Summary(Kind.RUN, full)
+        if (shape.steps.size > 1) return remoteScript(shape) ?: Summary(Kind.SEVERAL, shape.steps.size.toString())
+        if (shape.ambiguous) return Summary(Kind.RUN, full)
+        val words = prepared(words(shape.steps.single()))
+        if (words.isEmpty() || words.first().startsWith("-") || words.first() == "cd") return Summary(Kind.RUN, full)
+        return classify(words, home) ?: Summary(Kind.RUN, full)
     }
 
-    /** Shell segments (split on `&&`, `||`, `;`, `|`, newlines) as words, with `sudo`, `env X=y` and `cd dir` dropped. */
-    private fun split(command: String): List<List<String>> =
-        command.split(Regex("""&&|\|\||;|\||\n""")).map { words(it) }
-            .map { w -> w.dropWhile { it == "sudo" || it == "env" || it == "command" || Regex("^[A-Za-z_][A-Za-z0-9_]*=").containsMatchIn(it) } }
-            .filter { it.isNotEmpty() && it.first() != "cd" }
+    /**
+     * True when the card must show the exact command up front, not behind Details: the phone could not read it as one
+     * named action ([Kind.RUN]), it has several steps ([Kind.SEVERAL]), or it deletes several things ([Kind.DELETE_MANY]).
+     */
+    fun showsCommandUpFront(command: String): Boolean =
+        command.isNotBlank() && of(command).kind.let { it == Kind.RUN || it == Kind.SEVERAL || it == Kind.DELETE_MANY }
+
+    /** A command line as the shell splits it, outside quotes. [ambiguous] = something only the shell can resolve. */
+    internal data class Shape(val steps: List<String>, val separators: List<String>, val ambiguous: Boolean, val balanced: Boolean)
+
+    internal fun shape(command: String): Shape {
+        val steps = mutableListOf<String>()
+        val separators = mutableListOf<String>()
+        val cur = StringBuilder()
+        var ambiguous = false
+        var single = false
+        var double = false
+        fun cut(sep: String) { steps += cur.toString(); separators += sep; cur.clear() }
+        var i = 0
+        while (i < command.length) {
+            val c = command[i]
+            val next = command.getOrNull(i + 1)
+            when {
+                single -> { if (c == '\'') single = false; cur.append(c) }
+                double -> {
+                    if (c == '"') double = false else if (c == '$' || c == '`' || c == '\\') ambiguous = true
+                    cur.append(c)
+                }
+                // A quote inside a word (`--x='a b'`, `/a"b c"`) is joined by the shell in ways the word reader skips.
+                c == '\'' || c == '"' -> {
+                    if (cur.isNotEmpty() && !cur.last().isWhitespace()) ambiguous = true
+                    if (c == '\'') single = true else double = true
+                    cur.append(c)
+                }
+                c == '&' && next == '&' -> { cut("&&"); i++ }
+                c == '|' && next == '|' -> { cut("||"); i++ }
+                c == '|' -> if (next == '&') { cut("|&"); i++ } else cut("|")
+                c == ';' || c == '\n' || c == '\r' -> cut(";")
+                c == '&' -> {
+                    val prev = cur.lastOrNull()
+                    if (prev == '>' || prev == '<' || next == '>') cur.append(c) else cut("&")
+                }
+                c == '<' && next == '<' -> { ambiguous = true; cur.append(c) }
+                c in "$`\\*?[]{}()#" -> { ambiguous = true; cur.append(c) }
+                else -> cur.append(c)
+            }
+            i++
+        }
+        steps += cur.toString()
+        // A separator with nothing after it (`a;`, `a &`) adds no step: the steps are what runs.
+        return Shape(steps.map { it.trim() }.filter { it.isNotEmpty() }, separators, ambiguous, balanced = !single && !double)
+    }
+
+    /** `curl|wget <url> | [sudo] sh|bash|zsh [flags]`, and nothing else on the line. */
+    private fun remoteScript(shape: Shape): Summary? {
+        if (shape.ambiguous || shape.steps.size != 2 || shape.separators != listOf("|")) return null
+        val fetch = prepared(words(shape.steps[0]))
+        val run = prepared(words(shape.steps[1]))
+        if (fetch.firstOrNull()?.substringAfterLast('/') !in setOf("curl", "wget")) return null
+        if (run.firstOrNull()?.substringAfterLast('/') !in setOf("sh", "bash", "zsh") || run.drop(1).any { !it.startsWith("-") }) return null
+        if ((fetch + run).any { '>' in it || '<' in it }) return null
+        val host = Regex("""https?://([^/\s'"]+)""").find(shape.steps[0])?.groupValues?.get(1).orEmpty()
+        return Summary(Kind.RUN_REMOTE_SCRIPT, place = host)
+    }
+
+    /** A step's words with a leading `sudo`, `env`, `command` and `X=y` assignments dropped. */
+    private fun prepared(words: List<String>): List<String> =
+        words.dropWhile { it == "sudo" || it == "env" || it == "command" || Regex("^[A-Za-z_][A-Za-z0-9_]*=").containsMatchIn(it) }
 
     private fun words(segment: String): List<String> =
         Regex("""'[^']*'|"[^"]*"|\S+""").findAll(segment.trim()).map { it.value.trim { c -> c == '\'' || c == '\u0022' } }.filter { it.isNotEmpty() }.toList()
@@ -54,6 +125,47 @@ object CommandSummary {
     private fun flags(words: List<String>): String = words.drop(1).filter { it.startsWith("-") }.joinToString(" ")
 
     private fun classify(w: List<String>, home: String): Summary? {
+        // Redirect words are not operands (`rm -rf x 2>&1` deletes one folder). A redirect beside a named action is a
+        // second effect the headline would not name, so the command is shown instead; the only redirect a headline
+        // may stand on is one it names itself (`echo … > /etc/hosts`).
+        val plain = withoutRedirects(w)
+        if (plain.isEmpty()) return null
+        val n = redirects(w)
+        val action = action(plain, home)
+        if (action != null) return action.takeIf { n == 0 }
+        return if (n == 1) redirect(w, home) else null
+    }
+
+    /** [w] without redirect words and the target after a bare `>`, `>>`, `2>`, `<`. */
+    private fun withoutRedirects(w: List<String>): List<String> {
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < w.size) {
+            val word = w[i]
+            when {
+                Regex("""^[0-9&]?(>>?|<)$""").matches(word) -> i += 2
+                '>' in word || '<' in word -> i++
+                else -> { out += word; i++ }
+            }
+        }
+        return out
+    }
+
+    /** `<`/`>` words other than output thrown away (`>/dev/null`, `2>&1`, `> /dev/null`). */
+    private fun redirects(w: List<String>): Int {
+        var n = 0
+        var i = 0
+        while (i < w.size) {
+            val word = w[i]
+            if (Regex("""^[0-9&]?>>?$""").matches(word) && w.getOrNull(i + 1) == "/dev/null") { i += 2; continue }
+            if (Regex("""^[0-9&]?>>?(/dev/null|&[0-9])$""").matches(word)) { i++; continue }
+            if ('>' in word || '<' in word) n++
+            i++
+        }
+        return n
+    }
+
+    private fun action(w: List<String>, home: String): Summary? {
         val program = w.first().substringAfterLast('/')
         val args = operands(w)
         val flags = flags(w)
@@ -89,7 +201,7 @@ object CommandSummary {
             "tee" -> args.lastOrNull()?.let { Summary(Kind.OVERWRITE_FILE, name(it), place(parent(it), home)) }
             "reboot" -> Summary(Kind.REBOOT)
             "shutdown", "poweroff", "halt" -> if ("-r" in w) Summary(Kind.REBOOT) else Summary(Kind.SHUTDOWN)
-            else -> if (program.startsWith("mkfs.")) Summary(Kind.FORMAT_DISK, args.lastOrNull().orEmpty()) else redirect(w, home)
+            else -> if (program.startsWith("mkfs.")) Summary(Kind.FORMAT_DISK, args.lastOrNull().orEmpty()) else null
         }
     }
 

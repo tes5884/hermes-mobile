@@ -36,6 +36,13 @@ object ApprovalCards {
         /** The pattern name, shown as a small line under a command-made headline; blank otherwise. */
         val label: String get() = if (summary != null) description.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty() else ""
 
+        /**
+         * The exact, untruncated command goes on the card itself, not behind Details, when no one-action headline can
+         * stand for all of it (several steps, unreadable, several deletions) — whatever the headline says, since
+         * Approve authorizes the whole command (Shomer, P4).
+         */
+        val commandUpFront: Boolean get() = CommandSummary.showsCommandUpFront(command)
+
         /** The plain-words line: the description, else the command's first line. */
         val title: String get() = description.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
             ?.let { if (plainDescription) it else it.replaceFirstChar { c -> c.uppercase() } }
