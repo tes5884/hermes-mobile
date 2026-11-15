@@ -2,7 +2,8 @@ package com.nousresearch.hermesmobile.data
 
 /**
  * What is on screen, as far as per-chat state cares: the page, the open chat (and whether it is a writable bot chat),
- * the open room, the channels list, and the connection. Two equal views mean the user is looking at the same thing.
+ * the open room, the channels list, the full-screen Search palette, and the connection. Two equal views mean the user is
+ * looking at the same thing. While Search is open it covers everything, so no chat counts as shown ([chatPage] is false).
  *
  * [epoch] changes when the connection the open chat belongs to ends (disconnect, switch, sign-out), even if the
  * connection id stays the same: requests and recordings of the old connection are dead after that.
@@ -18,7 +19,8 @@ data class ChatView(
     val botChat: Boolean,
     val readOnly: Boolean,
     val room: String?,
-    val channelsList: Boolean
+    val channelsList: Boolean,
+    val search: Boolean
 ) {
     /** The bot chat actually on screen, for approval cards, or null. */
     val surface: InlineApprovalRouter.Surface?
@@ -35,7 +37,8 @@ data class ChatView(
  *
  * The view model runs [reconcile] on every change of the visible chat or page, and on every navigation intent
  * (new chat, branch, channel, All channels, drawer/rail, section or connection change, push tap, failed or stale
- * open, back), before that navigation has changed the screen. Each run:
+ * open, back; opening or closing Search changes what is visible too), before that navigation has changed the screen.
+ * Each run:
  *  - (a) discards a pending "Talk to …" recording unless it is still for what is now happening: its own open is the
  *    newest navigation and the screen is either still where it was recorded or showing that bot's chat;
  *  - (b) sorts approvals: waiting cards of a chat no longer on screen go to the dialog, the dialog's (and held)

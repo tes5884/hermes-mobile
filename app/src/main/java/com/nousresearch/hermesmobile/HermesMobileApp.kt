@@ -76,11 +76,11 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
         // their own back stack — an open chat, sub-pages — register deeper handlers that win).
         androidx.activity.compose.BackHandler(enabled = vm.canNavigateBack) { vm.navigateBack() }
         val wide = LocalWindowInfo.current.containerSize.width / LocalDensity.current.density >= 720f
-        var searchOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-        if (searchOpen) SearchPalette(
+        // Search's open state is view-model state, so opening it runs the chat-change reconcile (Shomer t_4b71caa6).
+        if (s.searchOpen) SearchPalette(
             s = s,
             kanbanAvailable = s.kanbanAvailable,
-            onDismiss = { searchOpen = false },
+            onDismiss = { vm.showSearch(false) },
             onOpenSession = vm::openSession,
             onSection = { section -> if (section == MainSection.CHAT) vm.closeActiveChat() else vm.switchSection(section) },
             onNewChat = { vm.newChat() },
@@ -100,7 +100,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                     kanbanAvailable = s.kanbanAvailable,
                     onKanban = { vm.switchSection(MainSection.KANBAN) },
                     onClose = { scope.launch { drawerState.close() } },
-                    onSearch = { searchOpen = true },
+                    onSearch = { vm.showSearch(true) },
                     // Recents is pure recency, as in Desktop: pinning only orders the Chats list.
                     recentSessions = remember(s.sessions) {
                         com.nousresearch.hermesmobile.data.HermesSession.collapseLineages(s.sessions)
@@ -186,7 +186,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                 // Rooms: a tapped file link opens the same viewer as 1:1, with the posting bot's profile.
                 var roomFile by remember { mutableStateOf<com.nousresearch.hermesmobile.ui.components.RoomArtifact?>(null) }
                 when (s.section) {
-                    MainSection.HOME -> ExperienceHome(s, openDrawer, vm::switchSection, { vm.newChat() }, vm::openSession) { searchOpen = true }
+                    MainSection.HOME -> ExperienceHome(s, openDrawer, vm::switchSection, { vm.newChat() }, vm::openSession) { vm.showSearch(true) }
                     MainSection.SYSTEM -> vm.featureRepository()?.let { repo -> key(repo, s.selectedProfile) {
                         SystemPage(repo, s.selectedProfile, s.profiles.map { it.name }, vm::selectProfile, onMenu = openDrawer) { vm.switchSection(MainSection.SERVER_SETTINGS) }
                     } }

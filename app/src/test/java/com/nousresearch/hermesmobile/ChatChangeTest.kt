@@ -68,7 +68,14 @@ class ChatChangeTest {
         }
 
         /** navigate(). */
-        fun navigate(): Long { generation += 1; reconcile(); return generation }
+        fun navigate(): Long {
+            generation += 1
+            if (state.searchOpen) set(state.copy(searchOpen = false))
+            reconcile(); return generation
+        }
+
+        /** showSearch (drawer Search, Home pill; dismiss or a result closes it first). */
+        fun showSearch(open: Boolean) = set(state.copy(searchOpen = open))
 
         /** onServerRequest for an approval. */
         fun request(r: ServerInteraction): Route = router.onRequest(r, view().surface).also { route ->
@@ -243,6 +250,69 @@ class ChatChangeTest {
         // Back from the channels list.
         val vm3 = Vm(); vm3.showChannels(true); val g3 = vm3.startOpenBot(ezra, talk = "note"); vm3.showChannels(false)
         assertNoteDiscarded(vm3, g3)
+    }
+
+    // ---- Search palette (Shomer t_4b71caa6): full-screen Search is a change of what is visible ------------------
+
+    @Test fun talkThenSearchOpensDiscards() {
+        val (vm, g) = talking(); vm.showSearch(true)
+        assertEquals(listOf("note"), vm.discarded) // at once, not when Search closes
+        assertNoteDiscarded(vm, g)
+    }
+
+    @Test fun talkThenSearchOpenedAndDismissedStillDiscards() {
+        val (vm, g) = talking(); vm.showSearch(true); vm.showSearch(false); assertNoteDiscarded(vm, g)
+    }
+
+    @Test fun talkThenSearchResultDiscards() {
+        // A palette result closes Search first, then runs (open a chat, a page, New chat).
+        val (vm, g) = talking(); vm.showSearch(true); vm.showSearch(false); vm.openSession(plainChat); assertNoteDiscarded(vm, g)
+        val (vm2, g2) = talking(); vm2.showSearch(true); vm2.showSearch(false); vm2.switchSection(MainSection.CRON); assertNoteDiscarded(vm2, g2)
+        val (vm3, g3) = talking(); vm3.showSearch(true); vm3.showSearch(false); vm3.landNewChat(vm3.newChat()); assertNoteDiscarded(vm3, g3)
+    }
+
+    @Test fun searchCountsAsAChangeOfView() {
+        val vm = Vm(); vm.openBot(ezra, ezraChat)
+        val shown = vm.view()
+        assertTrue(shown.surface != null)
+        vm.showSearch(true)
+        assertTrue(vm.view() != shown)
+        assertNull("no bot chat is on screen behind Search", vm.view().surface)
+        assertFalse(vm.view().showsBotChatOf("ezra", "c1"))
+        vm.showSearch(false)
+        assertEquals(shown, vm.view())
+    }
+
+    @Test fun pushTapWhileSearchIsOpenClosesSearch() {
+        val vm = Vm(); vm.showSearch(true); vm.openSession(plainChat)
+        assertFalse(vm.state.searchOpen)
+        assertEquals(MainSection.CHAT, vm.state.section)
+    }
+
+    @Test fun cardThenSearchGoesToDialogAndBackWhenSearchCloses() {
+        val vm = waitingCard(); vm.showSearch(true); assertInDialog(vm)
+        vm.showSearch(false)
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+    }
+
+    @Test fun approvalArrivingWhileSearchIsOpenIsADialogAndBecomesACardWhenSearchCloses() {
+        val vm = Vm(); vm.openBot(ezra, ezraChat); vm.showSearch(true)
+        assertEquals(Route.DIALOG, vm.request(approval("r1")))
+        assertInDialog(vm)
+        vm.showSearch(false)
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
+    }
+
+    @Test fun cardThenSearchResultOpeningAnotherChatGoesToDialogAndBack() {
+        val vm = waitingCard(); vm.showSearch(true); vm.showSearch(false); vm.openSession(plainChat)
+        assertInDialog(vm); assertBackToCard(vm)
+    }
+
+    @Test fun pushTapToTheSameBotChatWhileSearchIsOpenBringsTheCardBack() {
+        val vm = waitingCard(); vm.showSearch(true); assertInDialog(vm)
+        vm.openSession(ezraChat.copy(botChat = false))
+        assertFalse(vm.state.searchOpen)
+        assertEquals(setOf("r1"), vm.cards); assertTrue(vm.dialog.isEmpty())
     }
 
     // ---- P2: a waiting approval card --------------------------------------------------------------------------

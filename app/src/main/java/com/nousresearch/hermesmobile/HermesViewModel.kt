@@ -98,6 +98,8 @@ data class HermesUiState(
     val activeGroup: ActiveGroupRoom? = null,
     /** "All channels" from the bots page: the rooms list takes the page over until back. */
     val channelsListOpen: Boolean = false,
+    /** The full-screen Search palette covers the app. View-model state, not Compose state, so opening it reconciles. */
+    val searchOpen: Boolean = false,
     val groupActionBusy: Boolean = false,
     val pendingVoice: List<PendingVoiceNote> = emptyList(),
     val sessions: List<HermesSession> = emptyList(),
@@ -177,7 +179,8 @@ data class CommandOutput(val command: String, val output: String)
 
 /**
  * What [state] shows, for [com.nousresearch.hermesmobile.data.ChatChange]: page, open chat (a writable bot chat or
- * not), open room, channels list, connection. [epoch] counts ended connections.
+ * not), open room, channels list, Search palette, connection. [epoch] counts ended connections. Search covers the Chat
+ * page, so while it is open no chat is on screen.
  */
 internal fun chatViewOf(state: HermesUiState, epoch: Long): com.nousresearch.hermesmobile.data.ChatView {
     val chat = state.activeChat
@@ -185,14 +188,15 @@ internal fun chatViewOf(state: HermesUiState, epoch: Long): com.nousresearch.her
         epoch = epoch,
         connection = state.activeConnectionId,
         section = state.section.name,
-        chatPage = state.section == MainSection.CHAT,
+        chatPage = state.section == MainSection.CHAT && !state.searchOpen,
         storedSessionId = chat?.storedSessionId,
         runtimeSessionId = chat?.runtimeSessionId,
         profile = chat?.profile,
         botChat = chat != null && com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, state.profiles) != null,
         readOnly = chat?.readOnly == true,
         room = state.activeGroup?.room?.roomId,
-        channelsList = state.channelsListOpen
+        channelsList = state.channelsListOpen,
+        search = state.searchOpen
     )
 }
 
@@ -2265,6 +2269,15 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         if (open) refreshGroups()
     }
 
+    /**
+     * The full-screen Search palette opens (drawer, Home pill) or closes (dismiss, or just before running a result).
+     * Not a navigation: the screen behind it stays. But what is visible changes, so the uiState setter reconciles: a
+     * waiting Talk note is discarded, approval cards go to the dialog and come back as cards when Search closes.
+     */
+    fun showSearch(open: Boolean) {
+        uiState = uiState.copy(searchOpen = open)
+    }
+
     private fun startGroupPolling(roomId: String, generation: Long, immediate: Boolean = false) {
         groupPollingJob?.cancel()
         groupPollingJob = viewModelScope.launch {
@@ -4303,6 +4316,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
      */
     private fun navigate(): Long {
         val generation = ++navigationGeneration
+        // A navigation from outside the palette (a push tap) must not land hidden behind Search.
+        if (uiState.searchOpen) uiState = uiState.copy(searchOpen = false)
         reconcileChatChange()
         return generation
     }
