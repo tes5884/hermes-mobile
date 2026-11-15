@@ -714,7 +714,6 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             ?.takeIf { com.nousresearch.hermesmobile.ui.screens.botChatProfile(it, uiState.profiles) != null }?.let { START_SECTION }
         handOffQueue()
         persistCurrentComposerNow()
-        clearInlineApprovals()
         uiState.activeChat?.runtimeSessionId?.let(sessionModelPins::remove)
         pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         navigationGeneration += 1
@@ -738,6 +737,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             commandOutput = null,
             section = MainSection.CHAT
         )
+        // No chat on screen now: its waiting approval cards go to the dialog rather than vanish until it reopens.
+        adoptInlineApprovals()
         refreshSessions()
         if (back != null) switchSection(back, record = false)
     }
@@ -770,6 +771,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             groupPollingJob = null
         }
         uiState = uiState.copy(section = section)
+        // The bot chat is kept while another page shows, but it is not on screen: its approvals must reach the dialog
+        // (and come back into the chat when the Chat page shows it again). A chat that is still opening sorts its own.
+        if (section != MainSection.CHAT || !approvalRouter.opening) adoptInlineApprovals()
         when (section) {
             MainSection.BOTS -> {
                 // No asset revision is exposed by profiles.get_asset. Re-entering
@@ -4210,65 +4214,58 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     // ---- Inline approval cards (bot chats) -------------------------------------------------------------------
     private val approvalStore by lazy { com.nousresearch.hermesmobile.data.ApprovalCardStore(getApplication()) }
-    /** Open approval requests shown as cards in the open bot chat, by request id. */
-    private val inlineRequests = mutableMapOf<String, ServerInteraction>()
-    /** Approvals that arrived while a chat was opening (resume replays open requests before the chat is on screen). */
-    private val heldApprovals = mutableListOf<ServerInteraction>()
-    private var chatOpening = false
+    /** Which approvals are cards in the bot chat on screen, which wait for an opening chat, and which keep the dialog. */
+    private val approvalRouter = com.nousresearch.hermesmobile.data.InlineApprovalRouter<ServerInteraction>(
+        idOf = { it.requestId }, methodOf = { it.method }, sessionOf = { it.params.optString("session_id") }
+    )
 
-    /** An approval belongs inline when it is for the bot chat on screen; anything else keeps the dialog. */
-    private fun inlineApprovalFor(request: ServerInteraction, chat: ActiveChat?): Boolean {
-        if (request.method != "approval" || chat == null || chat.readOnly) return false
-        if (com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, uiState.profiles) == null) return false
-        val sid = request.params.optString("session_id")
-        return sid.isNotBlank() && (sid == chat.runtimeSessionId || sid == chat.storedSessionId)
+    /** The bot chat actually on screen: the Chat page showing a writable bot chat. A chat kept while another page shows is not. */
+    private fun visibleBotChat(): com.nousresearch.hermesmobile.data.InlineApprovalRouter.Surface? {
+        val chat = uiState.activeChat ?: return null
+        return com.nousresearch.hermesmobile.data.InlineApprovalRouter.surfaceFor(
+            chatPageShowing = uiState.section == MainSection.CHAT,
+            botChat = com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, uiState.profiles) != null,
+            readOnly = chat.readOnly, runtimeSessionId = chat.runtimeSessionId, storedSessionId = chat.storedSessionId
+        )
     }
 
     private fun showInlineApproval(request: ServerInteraction) {
-        inlineRequests[request.requestId] = request
+        completeInteraction(request.requestId) // never both a card and a dialog for one request
         val card = com.nousresearch.hermesmobile.data.ApprovalCards.fromRequest(request.requestId, request.params, System.currentTimeMillis())
         uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.upsert(uiState.approvalCards, card))
     }
 
-    /** The open chat changed: load its answered cards, then pull its approvals out of the dialog (and the held ones) into it. */
+    /**
+     * The visible chat changed (opened, closed, another page, back to the chat): load its answered cards, move the dialog's
+     * and the held approvals for it into it, and send waiting cards of a chat no longer on screen back to the dialog.
+     */
     private fun adoptInlineApprovals() {
-        chatOpening = false
         chatOpeningJob?.cancel()
         val chat = uiState.activeChat
-        // Requests of a chat no longer on screen stay open on the server; that chat replays them when it opens again.
-        inlineRequests.values.removeAll { !inlineApprovalFor(it, chat) }
-        val stored = chat?.let { approvalStore.load(it.profile, it.storedSessionId) }.orEmpty()
-        val keepPending = uiState.approvalCards.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING && it.requestId in inlineRequests }
+        val surface = visibleBotChat()
+        val moves = approvalRouter.reconcile(surface, listOfNotNull(uiState.interaction) + uiState.interactionQueue)
+        val pending = approvalRouter.pendingIds
+        val stored = chat?.takeIf { surface != null }?.let { approvalStore.load(it.profile, it.storedSessionId) }.orEmpty()
+        val keepPending = uiState.approvalCards.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING && it.requestId in pending }
         uiState = uiState.copy(approvalCards = (stored + keepPending).sortedBy { it.createdAtMs })
-        val held = heldApprovals.toList().also { heldApprovals.clear() }
-        val queued = listOfNotNull(uiState.interaction) + uiState.interactionQueue
-        (queued + held).filter { inlineApprovalFor(it, chat) }.forEach { request ->
-            completeInteraction(request.requestId)
-            showInlineApproval(request)
-        }
-        held.filterNot { inlineApprovalFor(it, chat) }.forEach(::enqueueInteraction)
+        moves.toCards.forEach(::showInlineApproval)
+        moves.toDialog.forEach(::enqueueInteraction)
     }
 
     private var chatOpeningJob: Job? = null
 
     /** A chat is about to open (or re-resume): hold its replayed approvals until it is on screen, 15 s at most. */
     private fun beginChatOpen() {
-        chatOpening = true
+        approvalRouter.beginOpen()
         chatOpeningJob?.cancel()
-        chatOpeningJob = viewModelScope.launch { delay(15_000); if (chatOpening) adoptInlineApprovals() }
-    }
-
-    /** Leaving a bot chat: its open requests stay open on the server (the chat replays them when it opens again). */
-    private fun clearInlineApprovals() {
-        inlineRequests.clear()
-        uiState = uiState.copy(approvalCards = emptyList())
+        chatOpeningJob = viewModelScope.launch { delay(15_000); if (approvalRouter.opening) adoptInlineApprovals() }
     }
 
     fun answerInlineApproval(requestId: String, choice: String) {
         if (choice !in setOf("once", "always", "deny")) return
         // "Always" only where Hermes offered it on this request.
         if (choice == "always" && uiState.approvalCards.none { it.requestId == requestId && it.allowAlways }) return
-        val request = inlineRequests.remove(requestId) ?: return
+        val request = approvalRouter.answer(requestId) ?: return
         repository?.gateway?.respond(request.requestId, JSONObject().put("choice", choice))
         val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(uiState.approvalCards, requestId, choice, System.currentTimeMillis())
         uiState = uiState.copy(approvalCards = cards)
@@ -4276,8 +4273,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun withdrawInlineApproval(requestId: String) {
-        heldApprovals.removeAll { it.requestId == requestId }
-        if (inlineRequests.remove(requestId) == null) return
+        if (!approvalRouter.withdraw(requestId)) return
         uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.withdraw(uiState.approvalCards, requestId))
     }
 
@@ -4388,11 +4384,11 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     override fun onServerRequest(request: ServerInteraction) {
         viewModelScope.launch(Dispatchers.Main.immediate) {
             when (request.method) {
-                "approval" -> when {
-                    inlineApprovalFor(request, uiState.activeChat) -> showInlineApproval(request)
-                    // A chat is opening: its replayed open requests arrive before it is on screen; sort them after.
-                    chatOpening -> heldApprovals += request
-                    else -> enqueueInteraction(request)
+                // A card only for the bot chat on screen; while a chat opens its replayed requests wait to be sorted.
+                "approval" -> when (approvalRouter.onRequest(request, visibleBotChat())) {
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.CARD -> showInlineApproval(request)
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.HOLD -> Unit
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.DIALOG -> enqueueInteraction(request)
                 }
                 "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
                     enqueueInteraction(request)
