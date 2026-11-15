@@ -211,8 +211,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private val avatarLoading = mutableSetOf<String>()
     private val avatarCacheOrder = ArrayDeque<String>()
     private var avatarCacheClearedAt = 0L
-    /** A voice note recorded on the bots page ("Talk to …"): sent once that bot's chat is open. */
-    private var pendingTalk: Triple<String, java.io.File, Long>? = null
+    /** A voice note recorded on the bots page ("Talk to …"): sent only by the chat open it started. */
+    private val pendingTalk = com.nousresearch.hermesmobile.data.PendingTalkSlot<Pair<java.io.File, Long>> { it.first.delete() }
 
     private val streamBuffer = StringBuilder()
     private var streamFlushJob: Job? = null
@@ -557,6 +557,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun disconnect(clearSaved: Boolean = false) {
         persistCurrentComposerNow()
         connectionGeneration += 1
+        pendingTalk.drop() // disconnecting: a waiting "Talk to …" note is discarded
         navigationGeneration += 1
         // Every network action is a ViewModel child. Cancelling existing children here gives
         // gateway switches a hard isolation boundary in addition to generation/repository guards.
@@ -712,6 +713,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         handOffQueue()
         persistCurrentComposerNow()
         uiState.activeChat?.runtimeSessionId?.let(sessionModelPins::remove)
+        pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         navigationGeneration += 1
         resetStream()
         composerSaveJob?.cancel()
@@ -748,6 +750,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun switchSection(section: MainSection, record: Boolean = true) {
+        // Leaving for another page while a "Talk to …" chat is still opening: the note is discarded, not sent later.
+        pendingTalk.drop()
         // Kanban is a destination only while the gateway has it for the selected profile.
         if (section == MainSection.KANBAN && !uiState.kanbanAvailable) return switchSection(START_SECTION, record)
         if (record && section != uiState.section) {
@@ -2738,6 +2742,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         rememberChatOrigin()
         handOffQueue()
         persistCurrentComposerNow()
+        pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         val generation = ++navigationGeneration
         resetStream()
         viewModelScope.launch {
@@ -2860,7 +2865,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun openSession(session: HermesSession) {
         val repo = repository ?: return
-        pendingTalk?.let { pendingTalk = null; it.second.delete() }
+        pendingTalk.drop()
         if (uiState.activeChat?.storedSessionId != session.id) handOffQueue()
         rememberChatOrigin()
         val generation = ++navigationGeneration
@@ -2916,12 +2921,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     /** True while the open chat is a Kanban worker's transcript: nothing sends to it or changes it. */
     private fun readOnlyActiveChat(): Boolean = uiState.activeChat?.readOnly == true
 
-    fun openBot(profile: HermesProfile) {
-        val repo = repository ?: return
-        // A "Talk to …" note waits only for its own bot's chat; opening anything else drops it.
-        pendingTalk?.takeIf { it.first != profile.name }?.let { pendingTalk = null; it.second.delete() }
+    fun openBot(profile: HermesProfile) = openBot(profile, talk = null)
+
+    private fun openBot(profile: HermesProfile, talk: Pair<java.io.File, Long>?) {
+        val repo = repository ?: run { talk?.first?.delete(); return }
+        // A "Talk to …" note belongs to the open that recorded it; any other open drops a waiting one.
+        pendingTalk.drop()
         rememberChatOrigin()
         val generation = ++navigationGeneration
+        val connection = uiState.activeConnectionId.orEmpty()
+        // Held before the open starts, so even an open that fails at once settles (discards) it.
+        if (talk != null) pendingTalk.hold(profile.name, generation, connection, talk)
         resetStream()
         viewModelScope.launch {
             uiState = uiState.copy(
@@ -2932,7 +2942,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             val (claimKickoff, releaseKickoff) = kickoffClaims()
             runCatching { repo.openBotChat(profile, claimKickoff, releaseKickoff) }
                 .onSuccess { chat ->
-                    if (generation == navigationGeneration) {
+                    val current = generation == navigationGeneration && repository === repo
+                    if (current) {
                         resetStream(chat.streamingText)
                         uiState = uiState.copy(
                             // Switch only now: switching first showed the Chats list while the chat loaded.
@@ -2945,29 +2956,24 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         )
                         loadChatEnhancements(chat.copy(title = profile.label))
                         markChatSeen(chat.storedSessionId)
-                        pendingTalk?.takeIf { it.first == profile.name }?.let { (_, file, ms) ->
-                            pendingTalk = null
-                            sendChatVoiceNote(file, ms)
-                        }
                     }
+                    // Only this very open, still current, on the same connection, sends the note it was started for.
+                    pendingTalk.settle(generation, profile.name, connection, current && uiState.activeConnectionId.orEmpty() == connection)
+                        ?.let { (file, ms) -> sendChatVoiceNote(file, ms) }
                 }
                 .onFailure {
                     if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
-                    pendingTalk?.takeIf { it.first == profile.name }?.let { pendingTalk = null; it.second.delete() }
+                    pendingTalk.settle(generation, profile.name, connection, current = false)
                 }
         }
     }
 
     /**
      * "Talk to …" on the bots page: the note goes into that bot's one chat, through the same path as a note recorded
-     * in the chat (pending bubble, transcript, audio attachment), once the chat is open.
+     * in the chat (pending bubble, transcript, audio attachment), once the chat is open. It is bound to the open
+     * started here: if anything else is opened first, or that open fails, the recording is discarded, never sent later.
      */
-    fun talkToBot(profile: HermesProfile, file: java.io.File, durationMs: Long) {
-        if (repository == null) { file.delete(); return }
-        pendingTalk?.second?.takeIf { it != file }?.delete()
-        pendingTalk = Triple(profile.name, file, durationMs)
-        openBot(profile)
-    }
+    fun talkToBot(profile: HermesProfile, file: java.io.File, durationMs: Long) = openBot(profile, talk = file to durationMs)
 
     fun loadOlderMessages() {
         val repo = repository ?: return
@@ -2997,6 +3003,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun branchSession(session: HermesSession) {
         val repo = repository ?: return
         rememberChatOrigin()
+        pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         val generation = ++navigationGeneration
         resetStream()
         viewModelScope.launch {
@@ -3070,6 +3077,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun createBot(name: String, title: String, description: String, cloneFrom: String? = null) {
         val repo = repository ?: return
         rememberChatOrigin()
+        pendingTalk.drop() // a competing navigation: a waiting "Talk to …" note is never sent later
         val generation = ++navigationGeneration
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null)
@@ -4600,6 +4608,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onCleared() {
+        pendingTalk.drop()
         persistCurrentComposerNow()
         readyWaiter?.cancel()
         streamFlushJob?.cancel()
