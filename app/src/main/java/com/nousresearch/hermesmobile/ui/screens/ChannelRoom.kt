@@ -44,8 +44,9 @@ import kotlinx.coroutines.launch
 /**
  * An open channel (Nova's mock 5): a Hermes Group Chat room where several bots answer in parallel. Header = back,
  * stacked avatars, the name and who's in it (tap for members, mention, rename, delete). Bot replies have no bubble
- * (avatar, name, time, then the words), his messages sit in soft bubbles with the mentions in colour, approval
- * cards sit indented under the asking bot's reply, and one "<Bot> is typing" line per answering bot stacks at the
+ * (avatar, name, time, then the words), his messages sit in soft bubbles with the mentions in colour, waiting
+ * approval cards sit at the live bottom (with a banner + Show while one is off screen), answered ones where they were
+ * answered, and one "<Bot> is typing" line per answering bot stacks at the
  * bottom. The composer is the bot chat's: +, a pill field, the 60dp hold-to-talk mic.
  */
 @Composable
@@ -81,8 +82,19 @@ internal fun ChannelRoomView(
     var ready by remember(roomKey) { mutableStateOf(false) }
     var seenSeq by remember(roomKey) { mutableLongStateOf(initialSaved ?: 0L) }
     val rows = remember(visibleEvents, dividerSeq) { RoomRows.build(visibleEvents, newMessagesBeforeSeq = dividerSeq) }
-    val reversedRows = remember(rows) { rows.asReversed() }
     val hiddenAuthors = remember(rows) { ChannelView.hiddenAuthors(rows) }
+    // Approvals: waiting ones at the live bottom, answered ones by time (ChannelView.place).
+    val placement = remember(visibleEvents, active.driver.pendingActions, active.approvalCards) {
+        ChannelView.place(visibleEvents, active.driver.pendingActions, active.approvalCards) { System.currentTimeMillis() }
+    }
+    val typing = remember(active.driver.memberActivity) { ChannelView.typing(active.driver.memberActivity) }
+    val attachActions = LocalGroupAttachmentActions.current
+    val pendingNotes = attachActions.pendingVoice.filter { it.roomId == active.room.roomId }
+    val notesById = pendingNotes.associateBy { it.id }
+    val noteIds = pendingNotes.map { it.id }
+    // Exactly what the list draws, newest first; every scroll target below is an index into this.
+    val entries = remember(typing.isNotEmpty(), noteIds, placement, rows) { ChannelView.liveEntries(typing.isNotEmpty(), noteIds, placement, rows) }
+    fun indexOfRow(match: (RoomRow) -> Boolean): Int = entries.indexOfFirst { it is ChannelView.Entry.Row && match(it.row) }
     LaunchedEffect(roomKey, visibleEvents.isNotEmpty()) {
         if (visibleEvents.isNotEmpty() && !anchored) {
             anchored = true
@@ -93,7 +105,7 @@ internal fun ChannelRoomView(
     val density = LocalDensity.current
     LaunchedEffect(dividerSeq) {
         val target = dividerSeq ?: return@LaunchedEffect
-        val idx = reversedRows.indexOfFirst { it is RoomRow.NewMessages }
+        val idx = indexOfRow { it is RoomRow.NewMessages }
         if (idx >= 0) {
             listState.scrollToItem(idx)
             // The divider now sits at the bottom edge; move the list back toward the newest so it lands near the top.
@@ -104,10 +116,10 @@ internal fun ChannelRoomView(
     }
     // A tapped routine notice: land on that post (after the unread-divider scroll), once.
     val pushAnchor = PushAnchor.pending(room = true)
-    LaunchedEffect(roomKey, ready, pushAnchor, reversedRows.size) {
+    LaunchedEffect(roomKey, ready, pushAnchor, entries.size) {
         if (!ready || pushAnchor == null) return@LaunchedEffect
         val post = RoutinePosts.roomTarget(visibleEvents, pushAnchor.text) ?: return@LaunchedEffect
-        val idx = reversedRows.indexOfFirst { it is RoomRow.Event && it.event.seq == post.seq }
+        val idx = indexOfRow { it is RoomRow.Event && it.event.seq == post.seq }
         if (idx >= 0) { listState.scrollToItem(idx); PushAnchor.clear() }
     }
     LaunchedEffect(roomKey, ready) {
@@ -129,7 +141,7 @@ internal fun ChannelRoomView(
     LaunchedEffect(pinTick) {
         if (pinTick > 0) { pinActive = true; listState.scrollToItem(0); kotlinx.coroutines.delay(2500); pinActive = false }
     }
-    LaunchedEffect(reversedRows.size) { if (pinActive) listState.scrollToItem(0) }
+    LaunchedEffect(entries.size) { if (pinActive) listState.scrollToItem(0) }
     val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
     val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
     active.room.members.forEach { m -> key(m.memberId) { profilesByName[m.profile]?.let { p -> LaunchedEffect(p.name, p.hasAvatar) { onEnsureAvatar(p) } } } }
@@ -139,17 +151,11 @@ internal fun ChannelRoomView(
         return profilesByName[m.profile]?.label?.takeIf { it.isNotBlank() } ?: m.label
     }
 
-    // Approvals: waiting ones under the asking bot's newest reply, answered ones by time (ChannelView.place).
-    val placement = remember(visibleEvents, active.driver.pendingActions, active.approvalCards) {
-        ChannelView.place(visibleEvents, active.driver.pendingActions, active.approvalCards) { System.currentTimeMillis() }
-    }
     val otherActions = remember(active.driver.pendingActions) { active.driver.pendingActions.filter { it.kind != "approval" } }
-    val typing = remember(active.driver.memberActivity) { ChannelView.typing(active.driver.memberActivity) }
     val answer: (GroupPendingAction, String) -> Unit = { action, choice -> if (!actionBusy) onApprove(action, choice) }
 
     // An open room is a view inside Bots: back closes it, it doesn't leave the page.
     androidx.activity.compose.BackHandler(onBack = onBack)
-    val attachActions = LocalGroupAttachmentActions.current
     Column(Modifier.fillMaxSize().imePadding()) {
         ChannelHeader(
             room = active.room, profilesByName = profilesByName, avatarAssets = avatarAssets, blocked = active.driver.blocked,
@@ -172,7 +178,6 @@ internal fun ChannelRoomView(
             }
         }
 
-        val pendingNotes = attachActions.pendingVoice.filter { it.roomId == active.room.roomId }
         val empty = visibleEvents.isEmpty() && pendingNotes.isEmpty() && typing.isEmpty() && placement.bottom.isEmpty()
         if (empty) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -180,59 +185,78 @@ internal fun ChannelRoomView(
             }
         } else {
             val awayFromBottom by remember(listState) { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 } }
+            // While an approval waits and its card isn't on screen, a banner over the transcript says who is
+            // waiting and jumps to the card (Shomer, t_86879164): it can't expire unseen while he reads history.
+            val minOnScreenPx = with(density) { 96.dp.roundToPx() }
+            val banner by remember(listState, entries) {
+                derivedStateOf {
+                    val info = listState.layoutInfo
+                    val onScreen = ChannelView.onScreenKeys(
+                        info.visibleItemsInfo.map { ChannelView.Laid(it.key, it.offset, it.size) },
+                        info.viewportStartOffset, info.viewportEndOffset, minOnScreenPx
+                    )
+                    ChannelView.approvalBanner(entries, onScreen)
+                }
+            }
+            val listScope = rememberCoroutineScope()
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = if (awayFromBottom) 52.dp else 10.dp),
+                    contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = if (banner != null) 64.dp else 8.dp, bottom = if (awayFromBottom) 52.dp else 10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Reversed list: index 0 is the bottom. Typing lines sit lowest, then his pending notes, then
-                    // approvals from bots with no reply loaded, then the transcript.
-                    if (typing.isNotEmpty()) item(key = "typing") {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            typing.forEach { t ->
-                                val m = membersById[t.memberId]
-                                TypingLine(m, m?.let { profilesByName[it.profile] }, avatarAssets, nameOf(t.memberId), t.tool)
+                    // Reversed list (ChannelView.liveEntries): index 0 is the bottom. Typing lines sit lowest, then
+                    // his pending notes, then every waiting approval, then the transcript.
+                    items(entries, key = { it.key }) { entry ->
+                        when (entry) {
+                            is ChannelView.Entry.TypingLines -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                typing.forEach { t ->
+                                    val m = membersById[t.memberId]
+                                    TypingLine(m, m?.let { profilesByName[it.profile] }, avatarAssets, nameOf(t.memberId), t.tool)
+                                }
                             }
-                        }
-                    }
-                    items(pendingNotes.asReversed(), key = { "p:" + it.id }) { note ->
-                        PendingVoiceBubble(note, { attachActions.onVoiceRetry(note.id) }, { attachActions.onVoiceAudioOnly(note.id) }, { attachActions.onVoiceDiscard(note.id) })
-                    }
-                    items(placement.bottom.asReversed(), key = { "a:" + it.key }) { item ->
-                        ChannelApproval(item, nameOf(memberIdOf(item)), answer)
-                    }
-                    items(reversedRows, key = { it.key }) { row ->
-                        when (row) {
-                            is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
-                            is RoomRow.NewMessages -> NewMessagesRow()
-                            is RoomRow.Event -> {
-                                val event = row.event
-                                val member = membersById[event.memberId]
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    ChannelEventRow(
-                                        event = event,
-                                        member = member,
-                                        profile = member?.let { profilesByName[it.profile] },
-                                        avatarAssets = avatarAssets,
-                                        name = nameOf(event.memberId),
-                                        showAuthor = event.seq !in hiddenAuthors,
-                                        handles = handles,
-                                        onReplyThread = { event.threadId.takeIf(String::isNotBlank)?.let(onReplyThread) },
-                                        onReplyTo = { handle -> input = appendMention(input, handle) }
-                                    )
-                                    placement.under[event.seq]?.forEach { item -> ChannelApproval(item, nameOf(memberIdOf(item, event.memberId)), answer) }
+                            is ChannelView.Entry.Note -> notesById[entry.id]?.let { note ->
+                                PendingVoiceBubble(note, { attachActions.onVoiceRetry(note.id) }, { attachActions.onVoiceAudioOnly(note.id) }, { attachActions.onVoiceDiscard(note.id) })
+                            }
+                            is ChannelView.Entry.Approval -> ChannelApproval(entry.item, nameOf(memberIdOf(entry.item)), answer)
+                            is ChannelView.Entry.Row -> when (val row = entry.row) {
+                                is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
+                                is RoomRow.NewMessages -> NewMessagesRow()
+                                is RoomRow.Event -> {
+                                    val event = row.event
+                                    val member = membersById[event.memberId]
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        ChannelEventRow(
+                                            event = event,
+                                            member = member,
+                                            profile = member?.let { profilesByName[it.profile] },
+                                            avatarAssets = avatarAssets,
+                                            name = nameOf(event.memberId),
+                                            showAuthor = event.seq !in hiddenAuthors,
+                                            handles = handles,
+                                            onReplyThread = { event.threadId.takeIf(String::isNotBlank)?.let(onReplyThread) },
+                                            onReplyTo = { handle -> input = appendMention(input, handle) }
+                                        )
+                                        placement.under[event.seq]?.forEach { item -> ChannelApproval(item, nameOf(memberIdOf(item, event.memberId)), answer) }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                banner?.let { b ->
+                    ApprovalWaitingBanner(
+                        text = if (b.memberIds.size == 1 && b.count == 1) stringResource(R.string.approval_needs_ok, nameOf(b.memberIds.single()))
+                            else pluralStringResource(R.plurals.channel_approvals_waiting, b.count, b.count),
+                        onShow = { listScope.launch { listState.animateScrollToItem(b.jumpIndex) } },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
                 if (awayFromBottom) {
-                    val chipScope = rememberCoroutineScope()
                     Surface(
-                        onClick = { chipScope.launch { listState.animateScrollToItem(0) } },
+                        onClick = { listScope.launch { listState.animateScrollToItem(0) } },
                         shape = RoundedCornerShape(50),
                         color = MaterialTheme.colorScheme.primaryContainer,
                         shadowElevation = 4.dp,
@@ -312,6 +336,33 @@ private fun ChannelApproval(item: ChannelView.Item, botName: String, onAnswer: (
     when (item) {
         is ChannelView.Item.Pending -> InlineApprovalCard(item.card, botName, onAnswer = { choice -> onAnswer(item.action, choice) }, modifier = indent)
         is ChannelView.Item.Answered -> InlineApprovalCard(item.card, botName, onAnswer = {}, modifier = indent)
+    }
+}
+
+/**
+ * Pinned over the transcript while an approval waits off screen: "Mason needs your OK" (or "2 approvals are
+ * waiting") and Show, which scrolls to the waiting card. It goes away once the card is on screen or answered.
+ */
+@Composable
+private fun ApprovalWaitingBanner(text: String, onShow: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        onClick = onShow,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        shadowElevation = 4.dp,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Shield, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer, maxLines = 2, overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(R.string.channel_approval_show), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer)
+        }
     }
 }
 

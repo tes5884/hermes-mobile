@@ -60,4 +60,11 @@
     <string name="approval_h_shutdown">Apagar este equipo</string>
     <string name="approval_h_run">Ejecutar este comando</string>
     <string name="approval_h_several">Ejecutar estos %s comandos, todos</string>
+
+    <string name="channel_approval_show">Ver</string>
+    <plurals name="channel_approvals_waiting">
+        <item quantity="one">%d aprobación te espera</item>
+        <item quantity="many">%d aprobaciones te esperan</item>
+        <item quantity="other">%d aprobaciones te esperan</item>
+    </plurals>
 </resources>

@@ -3,7 +3,8 @@ package com.nousresearch.hermesmobile.data
 /**
  * The pure rules behind a channel (Nova's mock 5): a Hermes Group Chat room where several bots answer in parallel.
  * The header names the members, each bot reply carries avatar + name + time (dropped for a quick follow-up by the
- * same bot), approval cards sit indented under the asking bot's newest reply, and one "<Bot> is typing" line per
+ * same bot), waiting approval cards sit at the live bottom (with a banner + jump while scrolled away), answered ones where
+ * they were answered, and one "<Bot> is typing" line per
  * bot that is answering right now stacks at the bottom.
  */
 object ChannelView {
@@ -63,9 +64,11 @@ object ChannelView {
     data class Placement(val under: Map<Long, List<Item>>, val bottom: List<Item>)
 
     /**
-     * Where each approval card goes. A waiting one sits under the asking bot's newest reply on screen, or at the
-     * bottom when none is loaded. One answered from this phone is placed by time (after the last row at or before
-     * it arrived) and is not shown once it is older than the loaded history. A waiting request this phone already
+     * Where each approval card goes. A waiting one always sits at the live bottom of the transcript, just above the
+     * typing lines, never under the asking bot's last reply: in a busy channel that reply can be a hundred messages
+     * up, and a card there can expire unseen while he reads the latest ones (Shomer, t_86879164). The card names the
+     * bot, so it doesn't need the reply above it. One answered from this phone is placed by time (after the last row
+     * at or before it arrived) and is not shown once it is older than the loaded history. A waiting request this phone already
      * answered is not shown twice: the answered card stands until the server drops the request. That match needs
      * Hermes' request id; a request without one is always shown, so a second ask in the same attempt can't hide
      * behind the first one's answer.
@@ -86,11 +89,60 @@ object ChannelView {
             if (at >= 0) under.getOrPut(events[at].seq) { ArrayList() }.add(Item.Answered(card))
         }
         pending.filter { it.kind == "approval" && (it.requestId.isBlank() || approvalKey(it) !in answeredIds) }.forEach { action ->
-            val item = Item.Pending(action, card(action, firstSeenMs(action)))
-            val newest = events.lastOrNull { it.kind == "message.member" && it.memberId == action.memberId }
-            if (newest != null) under.getOrPut(newest.seq) { ArrayList() }.add(item) else bottom.add(item)
+            bottom.add(Item.Pending(action, card(action, firstSeenMs(action))))
         }
         return Placement(under, bottom)
+    }
+
+    /** One entry of the channel's reverse-layout transcript; index 0 is the newest (the live bottom). */
+    sealed class Entry(val key: String) {
+        object TypingLines : Entry("typing")
+        class Note(val id: String) : Entry("p:$id")
+        class Approval(val item: Item) : Entry("a:" + item.key)
+        class Row(val row: RoomRow) : Entry(row.key)
+    }
+
+    /**
+     * Exactly what the channel's LazyColumn draws, in its order (newest first): the typing lines, his pending voice
+     * notes (newest lowest), the waiting approvals, then the transcript rows newest first. The screen renders this
+     * list as is, so a test on it is a test on what is on screen. Answered cards ride inside their row
+     * ([Placement.under]). [noteIds] and [rows] are oldest first, as [RoomRows.build] returns rows.
+     */
+    fun liveEntries(typing: Boolean, noteIds: List<String>, placement: Placement, rows: List<RoomRow>): List<Entry> {
+        val out = ArrayList<Entry>(rows.size + noteIds.size + placement.bottom.size + 1)
+        if (typing) out.add(Entry.TypingLines)
+        noteIds.asReversed().forEach { out.add(Entry.Note(it)) }
+        placement.bottom.asReversed().forEach { out.add(Entry.Approval(it)) }
+        rows.asReversed().forEach { out.add(Entry.Row(it)) }
+        return out
+    }
+
+    /** The "needs your OK" banner over the transcript: who is waiting, how many, and the entry to jump to. */
+    data class Banner(val memberIds: List<String>, val count: Int, val jumpIndex: Int)
+
+    /** A laid-out list item: its key, start offset and size in px (LazyListItemInfo, minus Compose). */
+    data class Laid(val key: Any, val offset: Int, val size: Int)
+
+    /**
+     * The keys that count as on screen: at least half of the item, or at least [minPx] of it, inside the viewport.
+     * A card with only a sliver peeking in at the edge isn't one he can read or tap, so its banner stays.
+     */
+    fun onScreenKeys(items: List<Laid>, viewportStart: Int, viewportEnd: Int, minPx: Int): Set<String> =
+        items.filter { item ->
+            val shown = minOf(item.offset + item.size, viewportEnd) - maxOf(item.offset, viewportStart)
+            shown > 0 && (shown * 2 >= item.size || shown >= minPx)
+        }.mapNotNull { it.key as? String }.toSet()
+
+    /**
+     * A banner while any approval is waiting and none of the waiting cards is on screen (he scrolled up, or the room
+     * opened at the unread divider or a tapped post). It stays until a waiting card is on screen or the request is
+     * answered or gone; its jump goes to the newest waiting card. [visibleKeys] are the entry keys on screen.
+     */
+    fun approvalBanner(entries: List<Entry>, visibleKeys: Set<String>): Banner? {
+        val waiting = entries.withIndex().filter { (_, e) -> e is Entry.Approval && e.item is Item.Pending }
+        if (waiting.isEmpty() || waiting.any { it.value.key in visibleKeys }) return null
+        val members = waiting.map { ((it.value as Entry.Approval).item as Item.Pending).action.memberId }.distinct()
+        return Banner(members, waiting.size, waiting.first().index)
     }
 
     data class Typing(val memberId: String, val tool: String)

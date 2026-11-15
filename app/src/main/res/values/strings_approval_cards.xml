@@ -60,4 +60,10 @@
     <string name="approval_h_shutdown">Shut down this computer</string>
     <string name="approval_h_run">Run this command</string>
     <string name="approval_h_several">Run these %s commands, all of them</string>
+
+    <string name="channel_approval_show">Show</string>
+    <plurals name="channel_approvals_waiting">
+        <item quantity="one">%d approval is waiting for you</item>
+        <item quantity="other">%d approvals are waiting for you</item>
+    </plurals>
 </resources>
