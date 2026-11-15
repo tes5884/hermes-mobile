@@ -2271,7 +2271,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         uiState = uiState.copy(
             activeGroup = ActiveGroupRoom(
                 room = room, events = events, cursor = cursor, latestSeq = maxOf(room.latestSeq, cachedMax ?: 0L),
-                link = if (repository == null || !networkOnline) RoomLink.OFFLINE else RoomLink.CONNECTING
+                link = if (repository == null || !networkOnline) RoomLink.OFFLINE else RoomLink.CONNECTING,
+                approvalCards = approvalStore.load(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, room.roomId)
             ),
             groupsLoading = false, groupError = null, groupActionBusy = false
         )
@@ -2322,10 +2323,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         if (generation == groupGeneration && latest?.room?.roomId == roomId) {
                             // Never let a slow poll move the monotonic cursor backwards.
                             val merged = com.nousresearch.hermesmobile.data.RoomCache.merge(latest.events, updated.events, Int.MAX_VALUE).takeLast(1200)
+                            noteRoomApprovals(roomId, updated.driver.pendingActions)
                             uiState = uiState.copy(activeGroup = updated.copy(
                                 // Composer state belongs to the latest snapshot, not the one this poll started from.
                                 composerAttachments = latest.composerAttachments,
                                 replyThreadId = latest.replyThreadId,
+                                approvalCards = latest.approvalCards,
                                 cursor = maxOf(latest.cursor, updated.cursor),
                                 latestSeq = maxOf(latest.latestSeq, updated.latestSeq),
                                 events = merged,
@@ -2626,13 +2629,41 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    /** When this phone first saw each waiting channel approval: an answered card is placed in the transcript by it. */
+    private val roomApprovalSeen = LinkedHashMap<String, Long>()
+
+    private fun noteRoomApprovals(roomId: String, actions: List<GroupPendingAction>) {
+        val now = System.currentTimeMillis()
+        actions.filter { it.kind == "approval" }.forEach { roomApprovalSeen.getOrPut("$roomId|" + com.nousresearch.hermesmobile.data.ChannelView.approvalKey(it)) { now } }
+        while (roomApprovalSeen.size > 200) roomApprovalSeen.remove(roomApprovalSeen.keys.first())
+    }
+
     fun approveGroupAction(action: GroupPendingAction, choice: String) {
         val repo = repository ?: return
         val active = uiState.activeGroup ?: return
+        val roomId = active.room.roomId
         viewModelScope.launch {
             uiState = uiState.copy(groupActionBusy = true)
-            runCatching { repo.approveGroupTask(active.room.roomId, action, choice) }
-                .onSuccess { uiState = uiState.copy(groupActionBusy = false, snackbar = string(if (choice == "once") R.string.i18n_vm_approved_once else R.string.i18n_vm_denied)) }
+            runCatching { repo.approveGroupTask(roomId, action, choice) }
+                .onSuccess {
+                    // Recorded only once the server took the answer, so the collapsed card never claims an answer that failed.
+                    val now = System.currentTimeMillis()
+                    val key = com.nousresearch.hermesmobile.data.ChannelView.approvalKey(action)
+                    val card = com.nousresearch.hermesmobile.data.ChannelView.card(action, roomApprovalSeen["$roomId|$key"] ?: now)
+                        // Without Hermes' request id, each answer is its own record: never merged with an earlier one.
+                        .let { if (action.requestId.isBlank()) it.copy(requestId = "$key@$now") else it }
+                    val current = uiState.activeGroup?.takeIf { it.room.roomId == roomId }
+                    val base = current?.approvalCards ?: approvalStore.load(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, roomId)
+                    val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(
+                        com.nousresearch.hermesmobile.data.ApprovalCards.upsert(base, card), card.requestId, choice, now
+                    )
+                    approvalStore.save(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, roomId, cards)
+                    uiState = uiState.copy(
+                        groupActionBusy = false,
+                        activeGroup = current?.copy(approvalCards = cards) ?: uiState.activeGroup,
+                        snackbar = string(if (choice == "once") R.string.i18n_vm_approved_once else R.string.i18n_vm_denied)
+                    )
+                }
                 .onFailure { uiState = uiState.copy(groupActionBusy = false, error = it.message) }
         }
     }

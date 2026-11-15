@@ -1,0 +1,14 @@
+<resources>
+    <plurals name="channel_members_more">
+        <item quantity="one">%1$s y %2$d más</item>
+        <item quantity="many">%1$s y %2$d más</item>
+        <item quantity="other">%1$s y %2$d más</item>
+    </plurals>
+    <string name="channel_members">Miembros del canal</string>
+    <string name="channel_mention">Mencionar a @%1$s</string>
+    <string name="channel_typing">%1$s está escribiendo</string>
+    <string name="channel_working_tool">%1$s está trabajando · %2$s</string>
+    <string name="channel_message_hint">Escribe al canal</string>
+    <string name="channel_reply_to">Responder a @%1$s</string>
+    <string name="channel_reply_thread">Responder en su hilo</string>
+</resources>

@@ -81,7 +81,7 @@ fun GroupsPanel(
     previews: Map<String, RoomPreview> = emptyMap()
 ) {
     if (active != null) {
-        GroupRoomView(
+        ChannelRoomView(
             active = active,
             profiles = profiles,
             actionBusy = actionBusy,
@@ -253,367 +253,11 @@ private fun CreateGroupDialog(
     )
 }
 
+/** Rename and Disband Group Chat, at the foot of an open channel's member menu. */
 @Composable
-private fun GroupRoomView(
-    active: ActiveGroupRoom,
-    profiles: List<HermesProfile>,
-    actionBusy: Boolean,
-    avatarAssets: Map<String, String>,
-    onEnsureAvatar: (HermesProfile) -> Unit,
-    onBack: () -> Unit,
-    onSend: (String) -> Unit,
-    onReplyThread: (String?) -> Unit,
-    onRename: (String) -> Unit,
-    onStop: () -> Unit,
-    onRetry: (GroupPendingAction) -> Unit,
-    onApprove: (GroupPendingAction, String) -> Unit,
-    onDisband: () -> Unit
-) {
-    var input by remember(active.room.roomId) { mutableStateOf("") }
-    var menu by remember { mutableStateOf(false) }
-    var rename by remember { mutableStateOf(false) }
-    var disband by remember { mutableStateOf(false) }
-    // Reverse-layout list like the 1:1 transcript: index 0 is the newest row, so the room opens at the
-    // latest message, stays pinned there as events arrive, and never moves a reader who scrolled up.
-    val listState = remember(active.room.roomId) { androidx.compose.foundation.lazy.LazyListState() }
-    val visibleEvents = remember(active.events) { active.events.filter { shouldRenderRoomEvent(it) } }
-    // Phone-side "where I left off": the highest seq shown per room. The divider is fixed when the room opens and
-    // stays until he leaves it; the saved position only moves once the initial scroll is done.
-    val readPrefs = LocalContext.current.getSharedPreferences("hermes_room_read", android.content.Context.MODE_PRIVATE)
-    val roomKey = active.room.roomId
-    val initialSaved = remember(roomKey) { RoomRead.load(readPrefs, roomKey) }
-    var dividerSeq by remember(roomKey) { mutableStateOf<Long?>(null) }
-    var anchored by remember(roomKey) { mutableStateOf(false) }
-    var ready by remember(roomKey) { mutableStateOf(false) }
-    var seenSeq by remember(roomKey) { mutableLongStateOf(initialSaved ?: 0L) }
-    val reversedRows = remember(visibleEvents, dividerSeq) { RoomRows.build(visibleEvents, newMessagesBeforeSeq = dividerSeq).asReversed() }
-    LaunchedEffect(roomKey, visibleEvents.isNotEmpty()) {
-        if (visibleEvents.isNotEmpty() && !anchored) {
-            anchored = true
-            dividerSeq = RoomRead.firstUnreadSeq(visibleEvents, initialSaved)
-            if (dividerSeq == null) ready = true
-        }
-    }
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    LaunchedEffect(dividerSeq) {
-        val target = dividerSeq ?: return@LaunchedEffect
-        val idx = reversedRows.indexOfFirst { it is RoomRow.NewMessages }
-        if (idx >= 0) {
-            listState.scrollToItem(idx)
-            // The divider now sits at the bottom edge; move the list back toward the newest so it lands near the top.
-            val h = listState.layoutInfo.viewportSize.height
-            if (h > 0) listState.scrollBy(-(h - with(density) { 96.dp.toPx() }).coerceAtLeast(0f))
-        }
-        ready = true
-    }
-    // A tapped routine notice: land on that post (after the unread-divider scroll), once.
-    val pushAnchor = PushAnchor.pending(room = true)
-    LaunchedEffect(roomKey, ready, pushAnchor, reversedRows.size) {
-        if (!ready || pushAnchor == null) return@LaunchedEffect
-        val post = com.nousresearch.hermesmobile.data.RoutinePosts.roomTarget(visibleEvents, pushAnchor.text) ?: return@LaunchedEffect
-        val idx = reversedRows.indexOfFirst { it is RoomRow.Event && it.event.seq == post.seq }
-        if (idx >= 0) { listState.scrollToItem(idx); PushAnchor.clear() }
-    }
-    LaunchedEffect(roomKey, ready) {
-        if (!ready) return@LaunchedEffect
-        snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNull { (it.key as? String)?.takeIf { k -> k.startsWith("e:") }?.drop(2)?.toLongOrNull() }.maxOrNull() ?: 0L
-        }.collect { top ->
-            if (top > seenSeq) { seenSeq = top; RoomRead.save(readPrefs, roomKey, top) }
-        }
-    }
-    LaunchedEffect(roomKey, ready, visibleEvents) {
-        if (!ready) return@LaunchedEffect
-        val own = RoomRead.newestOwnSeq(visibleEvents)
-        if (own > seenSeq) { seenSeq = own; RoomRead.save(readPrefs, roomKey, own) }
-    }
-    // Sending (text or voice) snaps to the newest row and keeps it there for a moment while the message lays out.
-    var pinTick by remember(roomKey) { mutableIntStateOf(0) }
-    var pinActive by remember(roomKey) { mutableStateOf(false) }
-    LaunchedEffect(pinTick) {
-        if (pinTick > 0) { pinActive = true; listState.scrollToItem(0); kotlinx.coroutines.delay(2500); pinActive = false }
-    }
-    LaunchedEffect(reversedRows.size) { if (pinActive) listState.scrollToItem(0) }
-    val membersById = remember(active.room.members) { active.room.members.associateBy { it.memberId } }
-    val profilesByName = remember(profiles) { profiles.associateBy { it.name } }
-
-    // An open room is a view inside Bots: back closes it, it doesn't leave the page.
-    androidx.activity.compose.BackHandler(onBack = onBack)
-    val attachActions0 = LocalGroupAttachmentActions.current
-    Column(Modifier.fillMaxSize().imePadding()) {
-        HermesTopBar(
-            active.room.name,
-            pluralStringResource(R.plurals.i18n_bots_count, active.room.members.size, active.room.members.size) + when {
-                active.driver.working -> " · " + stringResource(R.string.i18n_grp_working)
-                active.driver.blocked -> " · " + stringResource(R.string.i18n_grp_attention)
-                active.driver.running -> " · " + stringResource(R.string.i18n_grp_ready)
-                else -> ""
-            },
-            leading = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.a21_back)) } },
-            actions = {
-                if (active.driver.working) IconButton(onClick = onStop, enabled = !actionBusy) { Icon(Icons.Default.StopCircle, stringResource(R.string.i18n_grp_stop)) }
-                Box {
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, stringResource(R.string.i18n_grp_actions)) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.ui_3064d79a29)) },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) },
-                            onClick = { menu = false; rename = true }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.ui_5a7525fd26)) },
-                            leadingIcon = { Icon(Icons.Default.DeleteOutline, null) },
-                            onClick = { menu = false; disband = true }
-                        )
-                    }
-                }
-            }
-        )
-        DashedDivider(color = MaterialTheme.hermes.line)
-        if (active.link != com.nousresearch.hermesmobile.data.RoomLink.LIVE) {
-            Text(
-                stringResource(if (active.link == com.nousresearch.hermesmobile.data.RoomLink.OFFLINE) R.string.room_link_offline else R.string.room_link_connecting),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-            )
-        }
-
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 7.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            active.room.members.forEach { member ->
-                val profile = profilesByName[member.profile]
-                if (profile != null) LaunchedEffect(profile.name, profile.hasAvatar) { onEnsureAvatar(profile) }
-                AssistChip(
-                    onClick = { input = appendMention(input, member.handle) },
-                    label = { Text("@${member.handle}", maxLines = 1) },
-                    leadingIcon = if (profile != null) {
-                        { ProfileAvatar(profile, size = 22, avatarDataUrl = avatarAssets[profile.name]) }
-                    } else null
-                )
-            }
-        }
-
-        if (active.driver.pendingActions.isNotEmpty()) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                active.driver.pendingActions.forEach { action ->
-                    PendingRoomActionCard(action, membersById[action.memberId], actionBusy, onRetry, onApprove)
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-        }
-
-        val pendingNotes = attachActions0.pendingVoice.filter { it.roomId == active.room.roomId }
-        if (visibleEvents.isEmpty() && pendingNotes.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(stringResource(R.string.ui_ea79140946), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            val awayFromBottom by remember(listState) { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 } }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-            LazyColumn(
-                state = listState,
-                reverseLayout = true,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = if (awayFromBottom) 52.dp else 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Reversed list: index 0 is the newest, so his pending notes sit at the very bottom.
-                items(pendingNotes.asReversed(), key = { "p:" + it.id }) { note ->
-                    PendingVoiceBubble(note, { attachActions0.onVoiceRetry(note.id) }, { attachActions0.onVoiceAudioOnly(note.id) }, { attachActions0.onVoiceDiscard(note.id) })
-                }
-                items(reversedRows, key = { it.key }) { row ->
-                    when (row) {
-                        is RoomRow.Day -> DaySeparatorRow(dayLabel(row.millis))
-                        is RoomRow.NewMessages -> NewMessagesRow()
-                        is RoomRow.Event -> {
-                            val event = row.event
-                            RoomEventRow(
-                                event = event,
-                                member = membersById[event.memberId],
-                                onReplyThread = { event.threadId.takeIf(String::isNotBlank)?.let(onReplyThread) },
-                                onReplyTo = { handle -> input = appendMention(input, handle) }
-                            )
-                        }
-                    }
-                }
-            }
-            if (awayFromBottom) {
-                val chipScope = rememberCoroutineScope()
-                Surface(
-                    onClick = { chipScope.launch { listState.animateScrollToItem(0) } },
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shadowElevation = 4.dp,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
-                ) {
-                    Text(
-                        RoomRead.chipLabel(RoomRead.unreadCount(visibleEvents, seenSeq)),
-                        Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-            }
-            }
-        }
-
-        DashedDivider(color = MaterialTheme.hermes.line)
-        active.replyThreadId?.let { thread ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.Forum, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(6.dp))
-                Text(stringResource(R.string.i18n_grp_replying, thread), Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                IconButton(onClick = { onReplyThread(null) }, modifier = Modifier.size(28.dp)) { Icon(Icons.Default.Close, stringResource(R.string.i18n_grp_cancel_thread), Modifier.size(16.dp)) }
-            }
-        }
-        val attachActions = LocalGroupAttachmentActions.current
-        val picker = androidx.activity.compose.rememberLauncherForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
-        ) { uris -> if (uris.isNotEmpty()) attachActions.onAttach(uris) }
-        val takePhoto = rememberTakePhoto { attachActions.onAttach(listOf(it)) }
-        var attachMenu by remember { mutableStateOf(false) }
-        AttachmentStrip(active.composerAttachments, attachActions.onRemove)
-        val context = LocalContext.current
-        val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
-        var recorderLimit by remember { mutableStateOf(false) }
-        val recorder = remember(active.room.roomId) { com.nousresearch.hermesmobile.features.VoiceNoteRecorder(context) { recorderLimit = true } }
-        var recordingMs by remember { mutableStateOf<Long?>(null) }
-        var locked by remember { mutableStateOf(false) }
-        var dragX by remember { mutableFloatStateOf(0f) }
-        var levels by remember { mutableStateOf<List<Float>>(emptyList()) }
-        var micError by remember { mutableStateOf<String?>(null) }
-        var tooltip by remember { mutableStateOf(false) }
-        val tick: () -> Unit = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress) }
-        fun resetRecording() { recordingMs = null; locked = false; dragX = 0f; levels = emptyList() }
-        fun beginRecording(): Boolean {
-            micError = null
-            val ok = runCatching { recorder.start(); recordingMs = 0L; levels = emptyList(); locked = false; dragX = 0f }
-                .onFailure { micError = it.message ?: "Could not start recording" }.isSuccess
-            if (ok) tick()
-            return ok
-        }
-        fun finishRecording() {
-            resetRecording()
-            recorder.stop()?.let { (file, ms) -> attachActions.onSendVoice(file, ms); pinTick++ }
-        }
-        fun cancelRecording() { recorder.cancel(); resetRecording() }
-        val voicePermissionMsg = stringResource(R.string.a22_voice_permission)
-        val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
-            androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-        ) { granted -> if (!granted) micError = voicePermissionMsg } // allowed: he holds again
-        fun hasMic() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        LaunchedEffect(recordingMs != null) {
-            while (recordingMs != null) {
-                recordingMs = recorder.elapsedMs()
-                levels = VoiceNotes.pushLevel(levels, VoiceNotes.level(recorder.amplitude()))
-                kotlinx.coroutines.delay(50)
-            }
-        }
-        LaunchedEffect(recorderLimit) { if (recorderLimit) { recorderLimit = false; if (recorder.active) finishRecording() } }
-        LaunchedEffect(tooltip) { if (tooltip) { kotlinx.coroutines.delay(2000); tooltip = false } }
-        DisposableEffect(recorder) { onDispose { recorder.cancel() } }
-        com.nousresearch.hermesmobile.features.KeepScreenOnWhile(recordingMs != null)
-        micError?.let { Text(it, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
-
-        val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
-        val micCallbacks = remember(recorder) {
-            HoldMicCallbacks(
-                onPress = { if (hasMic()) beginRecording() else { micPermission.launch(android.Manifest.permission.RECORD_AUDIO); false } },
-                onDrag = { dx, _ -> dragX = dx },
-                onLock = { locked = true; dragX = 0f; tick() },
-                onRelease = { heldMs, cancelled ->
-                    when {
-                        !recorder.active -> {}                       // the 10 min cap already sent it
-                        cancelled -> { cancelRecording(); tick() }
-                        VoiceNotes.tooShort(heldMs) -> { cancelRecording(); tooltip = true }
-                        else -> finishRecording()
-                    }
-                },
-                onTalkBackToggle = {
-                    when {
-                        recorder.active -> finishRecording()
-                        hasMic() -> { if (beginRecording()) locked = true }
-                        else -> micPermission.launch(android.Manifest.permission.RECORD_AUDIO)
-                    }
-                }
-            )
-        }
-        val recording = recordingMs != null
-        val showMic = input.isBlank() && active.composerAttachments.isEmpty()
-        val live = active.link == com.nousresearch.hermesmobile.data.RoomLink.LIVE
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (recording) {
-                RecordingBar(recordingMs ?: 0L, levels, locked, dragX, onCancel = { cancelRecording() }, onSend = { finishRecording() }, modifier = Modifier.weight(1f))
-            } else {
-                Box {
-                    FilledTonalIconButton(enabled = !actionBusy && live, onClick = { attachMenu = true }, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Default.AttachFile, stringResource(R.string.chat_attach))
-                    }
-                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) },
-                            leadingIcon = { Icon(Icons.Default.AttachFile, null) },
-                            onClick = { attachMenu = false; picker.launch(arrayOf("*/*")) })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) },
-                            leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
-                            onClick = { attachMenu = false; takePhoto() })
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.weight(1f),
-                    minLines = 1,
-                    maxLines = 4,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-                    placeholder = { Text(stringResource(R.string.group_composer_hint), maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                )
-            }
-            if (!(recording && locked)) {
-                Spacer(Modifier.width(8.dp))
-                if (showMic || recording) {
-                    HoldMicButton(
-                        enabled = live || recording, recording = recording, cancelWidthPx = cancelWidthPx, callbacks = micCallbacks,
-                        tooltip = tooltip, showLockHint = recording && !locked
-                    )
-                } else {
-                    FilledIconButton(
-                        enabled = !actionBusy && live,
-                        modifier = Modifier.size(44.dp),
-                        onClick = { val value = input.trim(); input = ""; onSend(value); pinTick++ }
-                    ) { Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send)) }
-                }
-            }
-        }
-    }
-
-    if (rename) {
-        var value by remember { mutableStateOf(active.room.name) }
-        AlertDialog(
-            onDismissRequest = { rename = false },
-            title = { Text(stringResource(R.string.ui_14fbfb5329)) },
-            text = { HermesTextField(value, { value = it }, stringResource(R.string.i18n_name)) },
-            confirmButton = { TextButton(enabled = value.trim().isNotBlank() && !actionBusy, onClick = { rename = false; onRename(value) }) { Text(stringResource(R.string.ui_3064d79a29)) } },
-            dismissButton = { TextButton(onClick = { rename = false }) { Text(stringResource(R.string.ui_19766ed6cc)) } }
-        )
-    }
-    if (disband) {
-        AlertDialog(
-            onDismissRequest = { disband = false },
-            title = { Text(stringResource(R.string.i18n_grp_disband, active.room.name)) },
-            text = { Text(stringResource(R.string.ui_71f2b5e341)) },
-            confirmButton = { TextButton(enabled = !actionBusy, onClick = { disband = false; onDisband() }) { Text(stringResource(R.string.ui_f2a9142052)) } },
-            dismissButton = { TextButton(onClick = { disband = false }) { Text(stringResource(R.string.ui_19766ed6cc)) } }
-        )
-    }
+internal fun ChannelAdminItems(onRename: () -> Unit, onDisband: () -> Unit) {
+    DropdownMenuItem(text = { Text(stringResource(R.string.ui_3064d79a29)) }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = onRename)
+    DropdownMenuItem(text = { Text(stringResource(R.string.ui_5a7525fd26)) }, leadingIcon = { Icon(Icons.Default.DeleteOutline, null) }, onClick = onDisband)
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -691,7 +335,7 @@ internal fun RoomEventRow(
 }
 
 @Composable
-private fun PendingRoomActionCard(
+internal fun PendingRoomActionCard(
     action: GroupPendingAction,
     member: GroupMember?,
     busy: Boolean,
@@ -721,14 +365,14 @@ private fun PendingRoomActionCard(
     }
 }
 
-private fun shouldRenderRoomEvent(event: GroupEvent): Boolean = when (event.kind) {
+internal fun shouldRenderRoomEvent(event: GroupEvent): Boolean = when (event.kind) {
     "message.user", "message.member", "turn.failed", "turn.cancelled", "turn.deferred", "room.stop_requested" -> true
     // Only the success "Room settled" line is dropped; any other room status stays.
     "room.activity" -> !event.payload.optString("status").equals("settled", true)
     else -> false
 }
 
-private fun roomEventStatusText(event: GroupEvent, context: android.content.Context): String? = when (event.kind) {
+internal fun roomEventStatusText(event: GroupEvent, context: android.content.Context): String? = when (event.kind) {
     "turn.failed" -> context.getString(R.string.i18n_grp_turn_failed, event.payload.optString("error").ifBlank { context.getString(R.string.i18n_unknown_error) })
     "turn.cancelled" -> context.getString(R.string.i18n_grp_turn_cancelled, event.payload.optString("reason")).trimEnd(':', ' ')
     "turn.deferred" -> context.getString(R.string.i18n_grp_turn_deferred, event.payload.optString("reason")).trimEnd(':', ' ')
@@ -737,14 +381,14 @@ private fun roomEventStatusText(event: GroupEvent, context: android.content.Cont
     else -> null
 }
 
-private fun appendMention(text: String, handle: String): String {
+internal fun appendMention(text: String, handle: String): String {
     val prefix = text.trimEnd()
     return if (prefix.isBlank()) "@$handle " else "$prefix @$handle "
 }
 
 
 @Composable
-private fun RoomAttachment(eventId: String, attachment: GroupAttachment) {
+internal fun RoomAttachment(eventId: String, attachment: GroupAttachment) {
     val actions = LocalGroupAttachmentActions.current
     if (attachment.kind == "image") {
         val state = produceState<Result<android.graphics.Bitmap>?>(null, eventId, attachment.attachmentId) {
@@ -870,7 +514,7 @@ private fun VoiceNotePlayer(eventId: String, attachment: GroupAttachment) {
 
 /** "New messages" marker: sits above the first unread message and stays until the room is closed. */
 @Composable
-private fun NewMessagesRow() {
+internal fun NewMessagesRow() {
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         HorizontalDivider(Modifier.weight(1f), color = MaterialTheme.colorScheme.primary.copy(alpha = .6f))
         Text(stringResource(R.string.group_new_messages), Modifier.padding(horizontal = 10.dp), style = MaterialTheme.typography.labelMedium,

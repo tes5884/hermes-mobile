@@ -152,6 +152,99 @@ internal fun BotComposer(
     }
 }
 
+/**
+ * A channel's composer (Nova's mock 5): the bot chat's round +, a pill field "Message the channel" and the 60dp
+ * hold-to-talk mic (typed text turns it into Send), on the same recorder rig, gesture and limits. + offers attach
+ * a file or take a photo, as the room always did. [enabled] is false offline or while an action runs; the mic only
+ * needs the room to be live ([micEnabled]), so a recording isn't cut off by a busy flag.
+ */
+@Composable
+internal fun ChannelComposer(
+    roomKey: String,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    attachments: List<ComposerAttachment>,
+    onRemoveAttachment: (String) -> Unit,
+    enabled: Boolean,
+    micEnabled: Boolean,
+    onAttach: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onSend: () -> Unit,
+    onSendVoice: (java.io.File, Long) -> Unit
+) {
+    val haptics = LocalHapticFeedback.current
+    val rig = rememberVoiceNoteRig(roomKey, onSendVoice)
+    val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    var menu by remember(roomKey) { mutableStateOf(false) }
+    val hasMessage = draft.isNotBlank() || attachments.isNotEmpty()
+    val state = VoiceBubbles.composer(rig.recording, rig.locked, hasMessage)
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 6.dp)) {
+        rig.micError?.let { Text(it, Modifier.padding(horizontal = 8.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+        if (!rig.recording) AttachmentStrip(attachments, onRemoveAttachment)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f).padding(bottom = 2.dp)) {
+                if (rig.recording) BotRecordingPill(rig.recordingMs ?: 0L, rig.levels, rig.locked, rig.dragX, onCancel = rig.cancelRecording)
+                else Row(verticalAlignment = Alignment.Bottom) {
+                    Box {
+                        Surface(
+                            onClick = { menu = true }, enabled = enabled, shape = CircleShape, color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.hermes.lineStrong), modifier = Modifier.size(52.dp)
+                        ) { Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Add, stringResource(R.string.chat_attach)) } }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) }, leadingIcon = { Icon(Icons.Default.AttachFile, null) },
+                                onClick = { menu = false; onAttach() })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) }, leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
+                                onClick = { menu = false; onTakePhoto() })
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.hermes.lineStrong), modifier = Modifier.weight(1f).heightIn(min = 52.dp)
+                    ) {
+                        TextField(
+                            value = draft, onValueChange = onDraftChange, modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text(stringResource(R.string.channel_message_hint), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            maxLines = 6,
+                            textStyle = MaterialTheme.typography.bodyLarge,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                                disabledContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent
+                            ),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Default)
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.size(BigButton), contentAlignment = Alignment.Center) {
+                when {
+                    state == VoiceBubbles.Composer.LOCKED -> BigRoundButton(Icons.AutoMirrored.Filled.Send, stringResource(R.string.i18n_send), onClick = rig.finishRecording)
+                    // One call site for idle and recording, so the press that started the recording keeps its gesture.
+                    rig.recording || (!hasMessage && micEnabled) -> BigHoldMic(rig, cancelWidthPx)
+                    !hasMessage -> BigRoundButton(Icons.Default.Mic, stringResource(R.string.group_voice_note), enabled = false, onClick = {})
+                    else -> BigRoundButton(
+                        Icons.Default.ArrowUpward, stringResource(R.string.chat_send), enabled = enabled,
+                        onClick = { haptics.performHapticFeedback(HapticFeedbackType.Confirm); onSend() }
+                    )
+                }
+            }
+        }
+        // While recording, what letting go does (the mock's channel shows no idle hint under the mic). The line keeps
+        // its height either way, so the mic never moves under the finger that is holding it.
+        val hint = when (state) {
+            VoiceBubbles.Composer.RECORDING -> stringResource(R.string.botapp_release_hint)
+            VoiceBubbles.Composer.LOCKED -> stringResource(R.string.botapp_locked_hint)
+            else -> null
+        }
+        Text(
+            hint.orEmpty(), Modifier.align(Alignment.End).padding(top = 4.dp, end = 4.dp),
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1
+        )
+    }
+}
+
 /** System dictation (from the + menu) keeps its one-line status above the composer. */
 @Composable
 private fun DictationStatus(voice: VoiceActions) {

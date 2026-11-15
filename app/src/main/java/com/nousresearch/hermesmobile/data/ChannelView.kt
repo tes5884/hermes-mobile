@@ -1,0 +1,113 @@
+package com.nousresearch.hermesmobile.data
+
+/**
+ * The pure rules behind a channel (Nova's mock 5): a Hermes Group Chat room where several bots answer in parallel.
+ * The header names the members, each bot reply carries avatar + name + time (dropped for a quick follow-up by the
+ * same bot), approval cards sit indented under the asking bot's newest reply, and one "<Bot> is typing" line per
+ * bot that is answering right now stacks at the bottom.
+ */
+object ChannelView {
+    /** A bot's next reply within this long (and nothing in between) doesn't repeat its avatar and name. */
+    const val GROUP_GAP_MS = 5 * 60_000L
+
+    /** [ApprovalCardStore] key for channels: their cards are stored per room id under this pseudo-profile. */
+    const val STORE_PROFILE = "@channel"
+
+    /** The first [max] member names for the header line, and how many more there are. */
+    fun headerNames(members: List<GroupMember>, max: Int = 3): Pair<List<String>, Int> {
+        val names = members.map { it.label.ifBlank { it.handle } }.filter { it.isNotBlank() }
+        return names.take(max) to (names.size - max).coerceAtLeast(0)
+    }
+
+    /**
+     * Seqs of bot replies whose avatar + name header is dropped: the row right before is the same bot's reply,
+     * both timed, at most [GROUP_GAP_MS] apart. A day divider, the new-messages line, any other event or a
+     * routine post in between keeps the header. [rows] are oldest first, as [RoomRows.build] returns them.
+     */
+    fun hiddenAuthors(rows: List<RoomRow>, gapMs: Long = GROUP_GAP_MS): Set<Long> {
+        val out = HashSet<Long>()
+        var prev: GroupEvent? = null
+        for (row in rows) {
+            val e = (row as? RoomRow.Event)?.event
+            if (e == null) { prev = null; continue }
+            val p = prev
+            if (p != null && isBotReply(p) && isBotReply(e) && p.memberId == e.memberId) {
+                val a = RoomRows.millis(p)
+                val b = RoomRows.millis(e)
+                if (a != null && b != null && b - a in 0..gapMs) out.add(e.seq)
+            }
+            prev = e
+        }
+        return out
+    }
+
+    private fun isBotReply(e: GroupEvent) = e.kind == "message.member" && !RoutinePosts.isScheduled(e)
+
+    /** The id an approval is answered and stored under: Hermes' request id, else the exact attempt. */
+    fun approvalKey(a: GroupPendingAction): String = a.requestId.ifBlank { "${a.taskId}#${a.executionGeneration}" }
+
+    /**
+     * The card for a room approval. Hosted rooms only ever offer once / deny (the server filters the choices), so
+     * Always is never shown and the card reads "This kind always asks".
+     */
+    fun card(a: GroupPendingAction, firstSeenMs: Long): ApprovalCards.Card =
+        ApprovalCards.fromRequest(approvalKey(a), a.raw.optJSONObject("approval") ?: a.raw, firstSeenMs)
+            .let { if (it.command.isBlank() && it.description.isBlank()) it.copy(command = a.command, description = a.description) else it }
+            .copy(allowAlways = false)
+
+    sealed class Item(val key: String) {
+        class Pending(val action: GroupPendingAction, val card: ApprovalCards.Card) : Item(card.requestId)
+        class Answered(val card: ApprovalCards.Card) : Item(card.requestId)
+    }
+
+    data class Placement(val under: Map<Long, List<Item>>, val bottom: List<Item>)
+
+    /**
+     * Where each approval card goes. A waiting one sits under the asking bot's newest reply on screen, or at the
+     * bottom when none is loaded. One answered from this phone is placed by time (after the last row at or before
+     * it arrived) and is not shown once it is older than the loaded history. A waiting request this phone already
+     * answered is not shown twice: the answered card stands until the server drops the request. That match needs
+     * Hermes' request id; a request without one is always shown, so a second ask in the same attempt can't hide
+     * behind the first one's answer.
+     * [events] are the visible events, oldest first.
+     */
+    fun place(
+        events: List<GroupEvent>,
+        pending: List<GroupPendingAction>,
+        answered: List<ApprovalCards.Card>,
+        firstSeenMs: (GroupPendingAction) -> Long
+    ): Placement {
+        val under = LinkedHashMap<Long, MutableList<Item>>()
+        val bottom = ArrayList<Item>()
+        val answeredIds = answered.map { it.requestId }.toSet()
+        val anchors = ApprovalCards.anchors(answered, events.map { RoomRows.millis(it) ?: 0L })
+        answered.sortedBy { it.createdAtMs }.forEach { card ->
+            val at = anchors[card.requestId] ?: -1
+            if (at >= 0) under.getOrPut(events[at].seq) { ArrayList() }.add(Item.Answered(card))
+        }
+        pending.filter { it.kind == "approval" && (it.requestId.isBlank() || approvalKey(it) !in answeredIds) }.forEach { action ->
+            val item = Item.Pending(action, card(action, firstSeenMs(action)))
+            val newest = events.lastOrNull { it.kind == "message.member" && it.memberId == action.memberId }
+            if (newest != null) under.getOrPut(newest.seq) { ArrayList() }.add(item) else bottom.add(item)
+        }
+        return Placement(under, bottom)
+    }
+
+    data class Typing(val memberId: String, val tool: String)
+
+    /** One line per bot answering right now (queued and stopping bots aren't typing), in the server's order. */
+    fun typing(activity: List<GroupMemberActivity>): List<Typing> =
+        activity.filter { it.status == "running" }
+            .groupBy { it.memberId }
+            .map { (id, rows) -> Typing(id, rows.firstOrNull { it.tool.isNotBlank() }?.tool.orEmpty()) }
+
+    /** Spans of "@handle" for the channel's members in a message, for the blue mentions in his bubbles. */
+    fun mentionRanges(text: String, handles: Collection<String>): List<IntRange> {
+        if (handles.isEmpty() || '@' !in text) return emptyList()
+        val known = handles.filter { it.isNotBlank() }.map { it.lowercase() }.toSet()
+        return Regex("(?<![\\w@])@([A-Za-z0-9_.-]+)").findAll(text).mapNotNull { m ->
+            val handle = m.groupValues[1].trimEnd('.', '-')
+            if (handle.lowercase() in known) m.range.first..(m.range.first + handle.length) else null
+        }.toList()
+    }
+}
