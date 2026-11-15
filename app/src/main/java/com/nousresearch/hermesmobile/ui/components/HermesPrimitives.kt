@@ -605,7 +605,11 @@ fun ChatMessageBubble(
                     shape = RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp),
                     border = BorderStroke(1.dp, MaterialTheme.hermes.userBubbleBorder)
                 ) {
-                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // A voice note reads as audio + transcript (Nova's 2-chat-voice mock), not a file chip over text.
+                    val voiceNote = remember(message.attachments, message.refs, message.content) { com.nousresearch.hermesmobile.data.VoiceBubbles.of(message) }
+                    if (voiceNote != null) Box(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        VoiceNoteBody(voiceNote, messageTimeLabel(message.timestamp))
+                    } else Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (message.attachments.isNotEmpty()) {
                             // A stored ref knows where the file lives on the gateway: tapping opens it, as in Desktop.
                             val owner = LocalArtifactOwner.current
@@ -663,6 +667,14 @@ fun ChatMessageBubble(
             if (message.content.isNotBlank()) MarkdownLite(com.nousresearch.hermesmobile.data.ChatMedia.renderCaptioned(message.content))
         }
     }
+}
+
+/** A message's clock time ("8:02 AM"), or null before the server stamped it. Accepts seconds or millis. */
+@Composable
+private fun messageTimeLabel(timestamp: Long): String? {
+    if (timestamp <= 0L) return null
+    val millis = if (timestamp < 10_000_000_000L) timestamp * 1000L else timestamp
+    return android.text.format.DateFormat.getTimeFormat(androidx.compose.ui.platform.LocalContext.current).format(java.util.Date(millis))
 }
 
 @Composable

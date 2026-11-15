@@ -31,4 +31,14 @@
     <string name="botapp_show_hidden">Mostrar bots ocultos</string>
     <string name="botapp_hide_hidden">Ocultar bots ocultos</string>
     <string name="botapp_back_to_bots">Volver a los bots</string>
+    <string name="botapp_transcript">Transcripción</string>
+    <string name="botapp_no_transcript">No se pudo transcribir esta nota</string>
+    <string name="botapp_hold_to_talk">Mantén para hablar</string>
+    <string name="botapp_release_hint">Suelta para enviar · desliza arriba para bloquear</string>
+    <string name="botapp_locked_hint">Toca enviar cuando termines</string>
+    <string name="botapp_listening">Escuchando…</string>
+    <string name="botapp_message_bot">Mensaje a %s</string>
+    <string name="botapp_model">Modelo</string>
+    <string name="botapp_context">Contexto</string>
+    <string name="botapp_lock">Bloquear grabación</string>
 </resources>

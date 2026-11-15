@@ -28,4 +28,14 @@
     <string name="botapp_show_hidden">Show hidden bots</string>
     <string name="botapp_hide_hidden">Hide hidden bots</string>
     <string name="botapp_back_to_bots">Back to bots</string>
+    <string name="botapp_transcript">Transcript</string>
+    <string name="botapp_no_transcript">Couldn\'t transcribe this note</string>
+    <string name="botapp_hold_to_talk">Hold to talk</string>
+    <string name="botapp_release_hint">Let go to send · slide up to lock</string>
+    <string name="botapp_locked_hint">Tap send when you\'re done</string>
+    <string name="botapp_listening">Listening…</string>
+    <string name="botapp_message_bot">Message %s</string>
+    <string name="botapp_model">Model</string>
+    <string name="botapp_context">Context</string>
+    <string name="botapp_lock">Lock recording</string>
 </resources>

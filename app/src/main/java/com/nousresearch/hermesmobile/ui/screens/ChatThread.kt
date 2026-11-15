@@ -264,10 +264,12 @@ internal fun ChatThread(
         runCatching { context.startActivity(Intent.createChooser(send, null)) }
     }
 
+    // A voice note is being recorded in the bot composer: the bot header says "Listening…" (2b mock).
+    var listening by remember(conversationIdentity) { mutableStateOf(false) }
     voiceControls { voice ->
         Column(Modifier.fillMaxSize().imePadding()) {
             // A bot's one chat: the bot is the header (tap = its details); no session switcher, no new chat.
-            if (bot != null) BotChatTopBar(bot, chat.running, showBack = !twoPane, onBack = actions.onBack)
+            if (bot != null) BotChatTopBar(bot, chat.running, listening = listening, showBack = !twoPane, onBack = actions.onBack)
             else ChatThreadTopBar(
                 chat = chat,
                 artifactCount = artifactSuggestions.size,
@@ -318,7 +320,7 @@ internal fun ChatThread(
                                 val noteActions = LocalChatVoiceNoteActions.current
                                 if (noteActions != null) noteActions.pendingVoice.filter { it.roomId == "chat:${chat.storedSessionId}" }.forEach { note ->
                                     key(note.id) {
-                                        PendingVoiceBubble(note, { noteActions.onVoiceRetry(note.id) }, { noteActions.onVoiceAudioOnly(note.id) }, { noteActions.onVoiceDiscard(note.id) })
+                                        PendingVoiceBubble(note, { noteActions.onVoiceRetry(note.id) }, { noteActions.onVoiceAudioOnly(note.id) }, { noteActions.onVoiceDiscard(note.id) }, chatStyle = true)
                                     }
                                 }
                             }
@@ -403,7 +405,9 @@ internal fun ChatThread(
                 onContext = actions.onContext,
                 onSend = send,
                 onStop = actions.onStop,
-                onSteer = actions.onSteer
+                onSteer = actions.onSteer,
+                botName = bot?.profile?.label,
+                onRecordingChange = { listening = it }
             )
             }
         }
@@ -615,7 +619,7 @@ private fun ChatThreadTopBar(
  * and a chevron. The whole middle is one target that opens the bot's details.
  */
 @Composable
-private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, showBack: Boolean, onBack: () -> Unit) {
+private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, listening: Boolean = false, showBack: Boolean, onBack: () -> Unit) {
     val needsOk = bot.dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT ||
         bot.approvals.any { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }
     val working = running || bot.dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING
@@ -651,19 +655,24 @@ private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, showBack: Boolea
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(bot.profile.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                        if (role.isNotBlank() && (needsOk || working)) {
+                        if (role.isNotBlank() && (needsOk || working || listening)) {
                             Spacer(Modifier.width(8.dp))
                             Text(role, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    when {
-                        needsOk -> Text(stringResource(R.string.botapp_needs_ok), style = MaterialTheme.typography.bodyMedium, color = orange, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                        working -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    when (com.nousresearch.hermesmobile.data.VoiceBubbles.header(listening, needsOk, working)) {
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.LISTENING -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                            Spacer(Modifier.width(7.dp))
+                            Text(stringResource(R.string.botapp_listening), style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                        }
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.NEEDS_OK -> Text(stringResource(R.string.botapp_needs_ok), style = MaterialTheme.typography.bodyMedium, color = orange, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.WORKING -> Row(verticalAlignment = Alignment.CenterVertically) {
                             ThinkingIndicator(dotSize = 4.dp, spacing = 2.dp)
                             Spacer(Modifier.width(6.dp))
                             Text(stringResource(R.string.a21_working), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, maxLines = 1)
                         }
-                        role.isNotBlank() -> Text(role, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.ROLE -> if (role.isNotBlank()) Text(role, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
