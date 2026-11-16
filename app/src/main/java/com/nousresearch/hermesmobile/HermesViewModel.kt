@@ -1977,6 +1977,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         dropAvatarCache(it.name, markMissing = true)
                     }
                     uiState = uiState.copy(profiles = profiles, selectedProfile = selected)
+                    uiState.activeConnectionId?.let { prefetchPushAvatars(repo, it, profiles) }
                     then()
                 }
         }
@@ -2004,18 +2005,55 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun dropAvatarCache(name: String, markMissing: Boolean = false) {
         avatarAssets.remove(name)
         avatarCacheOrder.remove(name)
-        if (markMissing) { avatarMissing.add(name); com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(getApplication(), name, null) } else avatarMissing.remove(name)
+        if (markMissing) { avatarMissing.add(name); savePushAvatar(name, null) } else avatarMissing.remove(name)
     }
 
     private fun cacheAvatar(name: String, data: String) {
         avatarMissing.remove(name)
         avatarAssets[name] = data
-        getApplication<android.app.Application>().let { com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(it, name, data) }
+        savePushAvatar(name, data)
         avatarCacheOrder.remove(name)
         avatarCacheOrder.addLast(name)
         while (avatarCacheOrder.size > MAX_AVATAR_CACHE_ITEMS) {
             val evicted = avatarCacheOrder.removeFirst()
             avatarAssets.remove(evicted)
+        }
+    }
+
+    /** The photo a push draws, saved for the server on screen with the bot's `hermes-bots` revision and name. */
+    private fun savePushAvatar(name: String, data: String?) {
+        val connection = uiState.activeConnectionId ?: return
+        val bot = uiState.profiles.firstOrNull { it.name == name }
+        com.nousresearch.hermesmobile.push.PushAvatars.save(getApplication(), connection, name, data,
+            bot?.uiMetaRevisions?.get(com.nousresearch.hermesmobile.data.HermesRepository.BOT_META_KEY), bot?.label)
+    }
+
+    private var pushAvatarJob: Job? = null
+
+    /**
+     * After a roster load: every bot whose saved push photo is missing or was saved under another `hermes-bots`
+     * revision is fetched now, one at a time, so a push later renders the photo without a network call. Names are
+     * kept current too. Bound to the repository it started on; a connection change cancels it.
+     */
+    private fun prefetchPushAvatars(repo: HermesRepository, connection: String, profiles: List<HermesProfile>) {
+        val app = getApplication<android.app.Application>()
+        pushAvatarJob?.cancel()
+        pushAvatarJob = viewModelScope.launch {
+            for (bot in profiles) {
+                if (repository !== repo) return@launch
+                val revision = bot.uiMetaRevisions[com.nousresearch.hermesmobile.data.HermesRepository.BOT_META_KEY]
+                val saved = com.nousresearch.hermesmobile.push.PushAvatars.savedRevision(app, connection, bot.name)
+                val hasFile = com.nousresearch.hermesmobile.push.PushAvatars.hasPhoto(app, connection, bot.name)
+                if (!com.nousresearch.hermesmobile.push.PushAvatars.stale(saved, revision, hasFile, bot.hasAvatar)) {
+                    com.nousresearch.hermesmobile.push.PushAvatars.saveLabel(app, connection, bot.name, bot.label)
+                    continue
+                }
+                val data = if (bot.hasAvatar) runCatching { repo.getBotAvatar(bot.name) }.getOrElse { continue } else null
+                if (repository !== repo) return@launch
+                withContext(Dispatchers.IO) {
+                    com.nousresearch.hermesmobile.push.PushAvatars.save(app, connection, bot.name, data, revision, bot.label)
+                }
+            }
         }
     }
 

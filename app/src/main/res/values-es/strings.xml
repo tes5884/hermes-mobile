@@ -1,5 +1,6 @@
 <resources>
     <string name="push_channel">Novedades de Hermes</string>
+    <string name="push_you">Tú</string>
     <string name="push_generic">Tienes una novedad. Abre Hermes para verla.</string>
     <string name="push_title">Notificaciones</string>
     <string name="back">Volver</string>

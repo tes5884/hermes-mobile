@@ -32,6 +32,13 @@ class MainActivity : ComponentActivity() {
     }
     private fun receiveNotification(intent: Intent?) {
         if (intent?.action == com.nousresearch.hermesmobile.update.AppUpdates.ACTION_OPEN) { com.nousresearch.hermesmobile.update.AppUpdates.openDialog(this); return }
+        // A bot's conversation shortcut (Android's Conversations / launcher) or its group summary: that bot's chat.
+        val botConnection = intent?.getStringExtra(com.nousresearch.hermesmobile.push.PushConversation.EXTRA_CONNECTION)
+        val botProfile = intent?.getStringExtra(com.nousresearch.hermesmobile.push.PushConversation.EXTRA_PROFILE)
+        if (com.nousresearch.hermesmobile.push.PushConversation.opensBot(intent?.action, botConnection, botProfile)) {
+            vm.openNotification(com.nousresearch.hermesmobile.push.PushConversation.openEvent(botConnection!!, botProfile!!))
+            return
+        }
         val id = intent?.getStringExtra("event_id") ?: return
         val event = runCatching { com.nousresearch.hermesmobile.push.PushStore(this).events().firstOrNull { it.optString("event_id") == id } }.getOrNull()
         if (event != null) vm.openNotification(event)
