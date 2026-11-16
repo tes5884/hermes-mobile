@@ -112,6 +112,10 @@ internal fun BotHomeContent(
     var view by remember { mutableStateOf(BotHome.view(prefs.getString(BotHome.VIEW_PREF, null))) }
     val setView: (BotHome.View) -> Unit = { v -> view = v; prefs.edit().putString(BotHome.VIEW_PREF, BotHome.viewValue(v)).apply() }
     val tiles = view == BotHome.View.TILES && query.isBlank()
+    // The open tile menu is held by bot (routeKey) here, not by a tile's slot in a three-across row.
+    var tileMenuKey by remember { mutableStateOf<String?>(null) }
+    val tileMenuBot = BotHome.menuTarget(tileMenuKey, shown)
+    if (tileMenuKey != null && (tileMenuBot == null || !tiles)) SideEffect { tileMenuKey = null }
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 112.dp)) {
@@ -162,8 +166,13 @@ internal fun BotHomeContent(
                     items(members.chunked(TILE_COLUMNS), key = { row -> "t:" + row.first().routeKey }) { row ->
                         TileRow(row.size) { i ->
                             val bot = row[i]
-                            if (bot.activeConnection) LaunchedEffect(bot.profile.name, bot.profile.hasAvatar) { actions.onEnsureAvatar(bot.profile) }
-                            BotTile(bot, statuses[bot.routeKey], avatarAssets[bot.profile.name].takeIf { bot.activeConnection }, actions)
+                            // Keyed by bot: a roster refresh that shifts tiles must not hand one bot's open menu to another.
+                            key(bot.routeKey) {
+                                if (bot.activeConnection) LaunchedEffect(bot.profile.name, bot.profile.hasAvatar) { actions.onEnsureAvatar(bot.profile) }
+                                BotTile(bot, statuses[bot.routeKey], avatarAssets[bot.profile.name].takeIf { bot.activeConnection },
+                                    menuOpen = tileMenuBot?.routeKey == bot.routeKey, onMenu = { tileMenuKey = bot.routeKey },
+                                    onMenuDismiss = { tileMenuKey = null }, actions = actions)
+                            }
                         }
                     }
                     return@forEach
@@ -178,7 +187,7 @@ internal fun BotHomeContent(
                 if (tiles) items(rooms.take(6).chunked(TILE_COLUMNS), key = { row -> "troom:" + row.first().roomId }) { row ->
                     TileRow(row.size) { i ->
                         val room = row[i]
-                        ChannelTile(room, bots, avatarAssets, roomUnread[room.roomId] ?: 0, roomPreviews[room.roomId]) { actions.onOpenChannel(room) }
+                        key(room.roomId) { ChannelTile(room, bots, avatarAssets, roomUnread[room.roomId] ?: 0, roomPreviews[room.roomId]) { actions.onOpenChannel(room) } }
                     }
                 } else items(rooms.take(6), key = { "room:" + it.roomId }) { room ->
                     ChannelHomeRow(room, bots, avatarAssets, roomUnread[room.roomId] ?: 0, roomPreviews[room.roomId], use24h) { actions.onOpenChannel(room) }
@@ -240,8 +249,10 @@ private fun TileRow(count: Int, tile: @Composable (Int) -> Unit) {
 }
 
 @Composable
-private fun BotTile(bot: RoutedBot, status: BotHome.Status?, avatar: String?, actions: BotHomeActions) {
-    var menu by remember { mutableStateOf(false) }
+private fun BotTile(
+    bot: RoutedBot, status: BotHome.Status?, avatar: String?,
+    menuOpen: Boolean, onMenu: () -> Unit, onMenuDismiss: () -> Unit, actions: BotHomeActions
+) {
     val offline = offlineLabel(bot)
     val needsOk = offline == null && status?.kind == BotHome.Kind.NEEDS_OK
     val unread = offline == null && status?.kind == BotHome.Kind.WAITING
@@ -251,7 +262,7 @@ private fun BotTile(bot: RoutedBot, status: BotHome.Status?, avatar: String?, ac
             shape = shape, color = MaterialTheme.colorScheme.surfaceContainerLowest,
             border = BorderStroke(1.dp, if (needsOk) NeedsYou else MaterialTheme.hermes.line),
             modifier = Modifier.fillMaxWidth().heightIn(min = 126.dp).clip(shape)
-                .combinedClickable(onClick = { if (bot.activeConnection) actions.onOpen(bot.profile) else actions.onSwitchConnection(bot.connectionId) }, onLongClick = { menu = true })
+                .combinedClickable(onClick = { if (bot.activeConnection) actions.onOpen(bot.profile) else actions.onSwitchConnection(bot.connectionId) }, onLongClick = onMenu)
         ) {
             Box(if (needsOk) Modifier.background(androidx.compose.ui.graphics.Brush.verticalGradient(
                 listOf(NeedsYou.copy(alpha = 0.10f), androidx.compose.ui.graphics.Color.Transparent))) else Modifier) {
@@ -265,7 +276,7 @@ private fun BotTile(bot: RoutedBot, status: BotHome.Status?, avatar: String?, ac
                 if (unread) Box(Modifier.align(Alignment.TopEnd).padding(10.dp).size(10.dp).background(NeedsYou, CircleShape))
             }
         }
-        BotRowMenu(bot, menu, { menu = false }, actions)
+        BotRowMenu(bot, menuOpen, onMenuDismiss, actions)
     }
 }
 

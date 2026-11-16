@@ -74,6 +74,14 @@ object BotHome {
     fun view(saved: String?): View = if (saved == "tiles") View.TILES else View.LIST
     fun viewValue(view: View): String = if (view == View.TILES) "tiles" else "list"
 
+    /**
+     * The bot a tile's open long-press menu belongs to: held by its routeKey, never by grid position, so a roster
+     * refresh that inserts or reorders bots in the same row can't hand the open menu to a different bot (Shomer
+     * t_28984693). Null once that bot is gone; the menu then closes.
+     */
+    fun menuTarget(openKey: String?, bots: List<RoutedBot>): RoutedBot? =
+        openKey?.let { k -> bots.firstOrNull { it.routeKey == k } }
+
     data class Summary(val needYou: Int, val working: Int, val idle: Int)
 
     fun summary(statuses: Collection<Status>): Summary = Summary(
