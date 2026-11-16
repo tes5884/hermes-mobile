@@ -13,4 +13,9 @@
     <string name="queue_kept_in_chat">No se envió a %1$s. Se guarda en ese chat.</string>
     <string name="queue_kept_in_chat_generic">Un mensaje no se envió. Se guarda en su chat.</string>
     <string name="gateway_approval_already">Esa aprobación ya se respondió o terminó.</string>
+    <string name="queue_clear_failed">No se pudo borrar: el teléfono no pudo guardar el cambio. No se quitó nada.</string>
+    <string name="queue_change_failed">No se pudo guardar ese cambio en el teléfono. No se cambió nada.</string>
+    <string name="queue_import_failed">No se pudieron pasar los mensajes guardados de este chat a la bandeja de salida. Se guardan como estaban; abre el chat otra vez para reintentar.</string>
+    <string name="outbox_write_failed">El teléfono no pudo guardar el estado de un mensaje. Se conserva y, tras reiniciar, aparece como no enviado (nunca se envía solo).</string>
+    <string name="draft_save_failed">No se pudo guardar tu borrador en el teléfono.</string>
 </resources>

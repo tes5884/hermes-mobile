@@ -71,7 +71,7 @@ internal class ChatThreadActions(
     val onAttach: (List<Uri>) -> Unit,
     val onRemoveAttachment: (String) -> Unit,
     val onRemoveQueued: (String) -> Unit,
-    val onUpdateQueued: (String, String) -> Unit,
+    val onUpdateQueued: (String, String) -> Boolean,
     val onMoveQueued: (String, Int) -> Unit,
     val onClearQueue: () -> Unit,
     val onSwitchModel: (SessionModelChoice, String) -> Unit,
@@ -457,8 +457,8 @@ internal fun ChatThread(
     }
     editQueueItem?.let { item ->
         QueueEditDialog(item = item, onDismiss = { editQueueItem = null }) { value ->
-            actions.onUpdateQueued(item.id, value)
-            editQueueItem = null
+            // Not saved on the phone: the dialog stays open with your text, and the chat says so.
+            if (actions.onUpdateQueued(item.id, value)) editQueueItem = null
         }
     }
     commandOutput?.let { output -> CommandOutputSheet(output, onCopy = copy, onDismiss = actions.onDismissCommandOutput) }

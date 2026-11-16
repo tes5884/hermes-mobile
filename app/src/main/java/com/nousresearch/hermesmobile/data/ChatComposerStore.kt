@@ -4,13 +4,40 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Composer rows in clear text, by composer key. [write] (null: remove) is on disk when it returns, or throws. */
+interface ComposerRows {
+    fun read(key: String): String?
+    fun write(key: String, row: String?)
+    fun keys(): Set<String>
+}
+
+/** The rows on the phone: their own encrypted preferences file, every write a synchronous commit(). */
+class PrefsComposerRows(context: Context) : ComposerRows {
+    private val prefs = context.getSharedPreferences("hermes_mobile_chat", Context.MODE_PRIVATE)
+
+    override fun read(key: String): String? =
+        prefs.getString(key, null)?.let { runCatching { LocalCipher.decrypt(it) }.getOrNull() }
+
+    override fun write(key: String, row: String?) {
+        val edit = prefs.edit()
+        if (row == null) edit.remove(key) else edit.putString(key, LocalCipher.encrypt(row))
+        check(edit.commit()) { "Could not save the draft" }
+    }
+
+    override fun keys(): Set<String> = prefs.all.keys.toSet()
+}
+
 /**
  * Encrypted per-conversation drafts (text + attachments). Messages you sent are not here: they live in the [Outbox]
  * from the moment you press send, so nothing written to a composer can overwrite them. [State.queue] is only read, from
- * composers saved by older versions, to move it into the outbox once.
+ * composers saved by older versions, to move it into the outbox.
+ *
+ * Every write is durable or throws (a failed write stops and says so). A queue an older version left in a composer is
+ * carried over by every draft save, untouched, until [dropLegacyQueue], which the caller runs only once the outbox has
+ * that queue on disk (Shomer t_737920a6): no draft save, close or clear can drop it.
  */
-class ChatComposerStore(context: Context) : ComposerSaves {
-    private val prefs = context.getSharedPreferences("hermes_mobile_chat", Context.MODE_PRIVATE)
+class ChatComposerStore(private val rows: ComposerRows) : ComposerSaves {
+    constructor(context: Context) : this(PrefsComposerRows(context))
 
     data class State(
         val draft: String = "",
@@ -19,24 +46,25 @@ class ChatComposerStore(context: Context) : ComposerSaves {
         val queue: List<QueuedPrompt> = emptyList()
     )
 
+    @Synchronized
     override fun load(key: String): State {
-        val encoded = prefs.getString(key, null) ?: return State()
+        val row = rows.read(key) ?: return State()
         return runCatching {
-            val root = JSONObject(LocalCipher.decrypt(encoded))
+            val root = JSONObject(row)
             State(
                 draft = root.optString("draft"),
                 attachments = attachmentsFromJson(root.optJSONArray("attachments")),
                 queue = buildList {
                     val arr = root.optJSONArray("queue") ?: JSONArray()
                     for (i in 0 until arr.length()) {
-                        arr.optJSONObject(i)?.let { row ->
+                        arr.optJSONObject(i)?.let { item ->
                             add(
                                 QueuedPrompt(
-                                    id = row.optString("id"),
-                                    text = row.optString("text"),
-                                    attachments = attachmentsFromJson(row.optJSONArray("attachments")),
-                                    createdAt = row.optLong("created_at", 0L),
-                                    hold = row.optString("hold").takeIf { it in QueuedPrompt.HOLDS }
+                                    id = item.optString("id"),
+                                    text = item.optString("text"),
+                                    attachments = attachmentsFromJson(item.optJSONArray("attachments")),
+                                    createdAt = item.optLong("created_at", 0L),
+                                    hold = item.optString("hold").takeIf { it in QueuedPrompt.HOLDS }
                                 )
                             )
                         }
@@ -46,24 +74,38 @@ class ChatComposerStore(context: Context) : ComposerSaves {
         }.getOrDefault(State())
     }
 
-    /** Saves the draft and its attachments (never a queue: sent messages are the outbox's). */
+    /** Saves the draft and its attachments (never a new queue), carrying over any legacy queue. Throws when refused. */
+    @Synchronized
     override fun save(key: String, state: State) {
-        if (state.draft.isBlank() && state.attachments.isEmpty()) {
-            prefs.edit().remove(key).apply()
-            return
-        }
-        val root = JSONObject()
-            .put("draft", state.draft)
-            .put("attachments", attachmentsToJson(state.attachments))
-        prefs.edit().putString(key, LocalCipher.encrypt(root.toString())).apply()
+        rows.write(key, row(state.draft, state.attachments, legacyQueue(key)))
     }
 
-    fun referencedAttachmentUris(): Set<String> = prefs.all.keys.flatMap { key ->
+    /** The outbox has the old queue on disk: the composer lets go of it, its draft kept. Throws when refused. */
+    @Synchronized
+    override fun dropLegacyQueue(key: String) {
+        legacyQueue(key) ?: return
+        val saved = load(key)
+        rows.write(key, row(saved.draft, saved.attachments, null))
+    }
+
+    /** The row to store (null: nothing to keep, the row is removed). */
+    private fun row(draft: String, attachments: List<ComposerAttachment>, queue: JSONArray?): String? {
+        if (draft.isBlank() && attachments.isEmpty() && queue == null) return null
+        return JSONObject()
+            .put("draft", draft)
+            .put("attachments", attachmentsToJson(attachments))
+            .apply { queue?.let { put("queue", it) } }
+            .toString()
+    }
+
+    /** The raw queue an older version saved under [key], if any. */
+    private fun legacyQueue(key: String): JSONArray? =
+        rows.read(key)?.let { runCatching { JSONObject(it).optJSONArray("queue") }.getOrNull() }?.takeIf { it.length() > 0 }
+
+    fun referencedAttachmentUris(): Set<String> = rows.keys().flatMap { key ->
         val state = load(key)
         state.attachments.map { it.uri } + state.queue.flatMap { it.attachments.map { file -> file.uri } }
     }.toSet()
-
-    fun remove(key: String) = prefs.edit().remove(key).apply()
 
     private fun attachmentsToJson(items: List<ComposerAttachment>): JSONArray = JSONArray(items.map {
         JSONObject()

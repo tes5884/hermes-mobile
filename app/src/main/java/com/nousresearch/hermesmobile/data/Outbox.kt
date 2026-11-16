@@ -6,11 +6,25 @@ import kotlin.coroutines.coroutineContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Where the outbox keeps its entries: one string per entry id. Both calls are on disk when they return. */
+/** Where the outbox keeps its entries: one string per entry id. Every call is on disk when it returns, or throws. */
 interface OutboxStorage {
     fun readAll(): Map<String, String>
-    /** Writes (null: deletes) one entry and returns only once it is durable. */
-    fun write(id: String, value: String?)
+    /**
+     * Writes (null: deletes) all of [changes] in one go and returns only once they are durable: all of them or none.
+     * Throws when the disk refused (then none of them is written).
+     */
+    fun writeAll(changes: Map<String, String?>)
+    /** Writes (null: deletes) one entry; see [writeAll]. */
+    fun write(id: String, value: String?) = writeAll(mapOf(id to value))
+}
+
+/** What a change you asked for did. */
+enum class OutboxChange {
+    DONE,
+    /** Not allowed now (it is going out, it is gone, nothing to move): nothing changed. */
+    NOT_ALLOWED,
+    /** The disk refused it: nothing changed, on disk or on screen. The caller says so. */
+    NOT_SAVED
 }
 
 /** The rewind an edit asks for while it is still waiting or going out (Desktop's truncateSubmitParams). */
@@ -67,6 +81,16 @@ data class OutboxEntry(
  *
  * Order: only the head of a chat may go out, and only when it is queued or busy. Anything sending, not sent or unsure
  * at the head stops every entry after it (no skip-ahead), until you resolve it: send again, edit, or remove.
+ *
+ * A failed write stops and says so (Tzvi 2026-11-15, Shomer t_737920a6):
+ *  - Anything you ask for (send, send again, edit, remove, clear, move), every claim and the legacy move change memory
+ *    only after the disk has them; when the disk refuses, nothing changes and the caller is told
+ *    ([OutboxChange.NOT_SAVED], false, or a throw) and says so.
+ *  - What the gateway answered (taken, refused, a cancelled sender, a rotated session) is recorded in memory even when
+ *    the disk refuses it, because what the disk still holds then is the earlier, safer state ("sending"), which no
+ *    start ever sends by itself. [onWriteFailed] says so, and the write is tried again with the next change.
+ *  - Nothing read from the disk at start is ever sent by itself: it loads as not sent (unsure once prompt.submit went
+ *    out) and waits for you to tap. The same goes for a queue moved in from an older version.
  */
 class Outbox(private val storage: OutboxStorage, private val clock: () -> Long = System::currentTimeMillis) {
     companion object {
@@ -136,55 +160,99 @@ class Outbox(private val storage: OutboxStorage, private val clock: () -> Long =
     private val inFlight = HashSet<String>()
     /** Ids of legacy queue items already moved in (kept on disk), so a composer saved by an old version never re-adds one. */
     private val imported = HashSet<String>()
+    /** Entries whose latest outcome is only in memory so far (recorded while the disk refused it). */
+    private val dirty = HashSet<String>()
     private var nextSeq = 0L
     /** Called after every change (on the thread that made it). */
     @Volatile var onChange: (() -> Unit)? = null
+    /** Called when the disk refused to record what happened to a message (on the thread that saw it). */
+    @Volatile var onWriteFailed: ((Throwable) -> Unit)? = null
 
     init {
         storage.readAll().forEach { (id, raw) ->
             if (id.startsWith(IMPORTED)) imported += id.removePrefix(IMPORTED)
-            else decode(raw)?.let { entries[id] = it }
+            else decode(raw)?.let { entries[id] = restored(it) }
         }
         nextSeq = (entries.values.maxOfOrNull { it.seq } ?: 0L) + 1
-        // A new process: whatever was going out when the last one died has no sender any more.
-        settleOrphans(notify = false)
     }
 
+    /**
+     * What an entry read from the disk at start becomes: never something that goes out by itself (Tzvi 2026-11-15).
+     * In memory only, on every start, so there is nothing to write and nothing that can fail; the disk keeps what it
+     * had until you act on the entry.
+     */
+    private fun restored(e: OutboxEntry): OutboxEntry = when {
+        e.state == UNSURE || e.state == NOT_SENT -> e
+        e.state == SENDING && e.submitted -> failed(e, UNSURE)
+        else -> failed(e, NOT_SENT)
+    }
+
+    /** Writes [changes] in one durable go, or throws having written none of them. */
+    private fun commit(changes: Map<String, String?>) {
+        if (changes.isNotEmpty()) storage.writeAll(changes)
+    }
+
+    /** On disk first; memory only once the disk has it. Throws (memory untouched) when the disk refused. */
     private fun put(e: OutboxEntry) {
         storage.write(e.id, encode(e))
         entries[e.id] = e
+        dirty -= e.id
     }
 
     private fun drop(id: String) {
         storage.write(id, null)
         entries.remove(id)
+        dirty -= id
     }
 
     /**
-     * After the send: the new state is recorded even if the disk refuses it (full). What the disk still holds then is
-     * the earlier, safer state (sending, so unsure/queued at the next start), never less than what happened.
+     * What the gateway answered (or a cancelled sender) is recorded in memory even if the disk refuses it: what the
+     * disk still holds then is the earlier, safer state ("sending", which no start ever sends by itself). Says so, and
+     * the write is tried again with the next change.
      */
     private fun record(e: OutboxEntry) {
-        runCatching { storage.write(e.id, encode(e)) }
         entries[e.id] = e
+        persistOutcome(e.id, encode(e))
     }
 
     private fun forget(id: String) {
-        runCatching { storage.write(id, null) }
         entries.remove(id)
+        persistOutcome(id, null)
     }
 
-    /** A change you asked for (send again, edit, remove, move): false when the disk refused it (nothing changed). */
-    private inline fun userChange(block: () -> Boolean): Boolean =
-        runCatching { mutate(block) }.getOrDefault(false)
+    private fun persistOutcome(id: String, value: String?) {
+        try {
+            storage.write(id, value)
+            dirty -= id
+        } catch (t: Throwable) {
+            dirty += id
+            onWriteFailed?.invoke(t)
+        }
+    }
+
+    /** Outcomes the disk refused earlier: written now, before the next change (best effort, all or none). */
+    private fun flushDirty() {
+        if (dirty.isEmpty()) return
+        runCatching { commit(dirty.associateWith { id -> entries[id]?.let(::encode) }) }.onSuccess { dirty.clear() }
+    }
+
+    /** A change you asked for: [OutboxChange.NOT_SAVED] when the disk refused it (then nothing changed). */
+    private inline fun userChange(block: () -> OutboxChange): OutboxChange =
+        try { mutate(block) } catch (t: CancellationException) { throw t } catch (_: Throwable) { OutboxChange.NOT_SAVED }
 
     private fun changed() = onChange?.invoke()
 
     private inline fun <T> mutate(block: () -> T): T {
-        val result = synchronized(lock, block)
+        val result = synchronized(lock) {
+            flushDirty()
+            block()
+        }
         changed()
         return result
     }
+
+    /** Ids whose latest outcome is only in memory (the disk has refused it so far). */
+    fun unsaved(): Set<String> = synchronized(lock) { HashSet(dirty) }
 
     fun get(id: String): OutboxEntry? = synchronized(lock) { entries[id] }
 
@@ -230,8 +298,8 @@ class Outbox(private val storage: OutboxStorage, private val clock: () -> Long =
         val e = entries[id] ?: return@mutate null
         val head = entries.values.filter { it.chatKey == e.chatKey }.minByOrNull { it.seq }
         if (head?.id != id || e.state !in SENDABLE || id in inFlight) return@mutate null
-        inFlight += id
-        e.copy(state = SENDING, submitted = false, claimedFrom = e.state).also(::put)
+        // On disk first (a throw: not claimed, and no stale hold left behind); only then is it this sender's.
+        e.copy(state = SENDING, submitted = false, claimedFrom = e.state).also(::put).also { inFlight += id }
     }
 
     /** prompt.submit is about to go out: from here on, an unknown outcome means it may be on the gateway. */
@@ -289,80 +357,107 @@ class Outbox(private val storage: OutboxStorage, private val clock: () -> Long =
         }
     }
 
-    /** Sending entries no sender in this process holds (the process that sent them died) are settled. */
-    fun settleOrphans(notify: Boolean = true) {
-        val run = {
-            entries.values.filter { it.state == SENDING && it.id !in inFlight }.forEach { record(orphaned(it)) }
-        }
-        if (notify) mutate(run) else synchronized(lock, run)
-    }
-
     /** You chose to send a held message again (not sent, or not sure it sent): it waits for its turn as new. */
-    fun retry(id: String): Boolean = userChange {
-        val e = entries[id]?.takeIf { it.state in FENCES } ?: return@userChange false
+    fun retry(id: String): OutboxChange = userChange {
+        val e = entries[id]?.takeIf { it.state in FENCES } ?: return@userChange OutboxChange.NOT_ALLOWED
         put(e.copy(state = QUEUED, editFailed = false, edit = null))
-        true
+        OutboxChange.DONE
     }
 
     /** You edited a waiting message: new text, and a held one is released to be sent again. */
-    fun update(id: String, text: String): Boolean = userChange {
-        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange false
+    fun update(id: String, text: String): OutboxChange = userChange {
+        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange OutboxChange.NOT_ALLOWED
         put(e.copy(text = text, state = if (e.state in FENCES) QUEUED else e.state, editFailed = false, edit = null))
-        true
+        OutboxChange.DONE
     }
 
-    /** You removed it (never while it is going out). */
-    fun discard(id: String): Boolean = userChange {
-        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange false
+    /** You removed it (never while it is going out): off the disk first, then off the screen. */
+    fun discard(id: String): OutboxChange = userChange {
+        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange OutboxChange.NOT_ALLOWED
         drop(e.id)
-        true
+        OutboxChange.DONE
     }
 
-    fun discardAll(chatKey: String) {
-        mutate { entries.values.filter { it.chatKey == chatKey && it.state != SENDING }.map { it.id }.forEach(::forget) }
+    /**
+     * Clear: every waiting entry of the chat (not one going out) off the disk in one go, then off the screen. When the
+     * disk refuses, none is removed anywhere: they all stay, and the caller says Clear failed.
+     */
+    fun discardAll(chatKey: String): OutboxChange = userChange {
+        val ids = entries.values.filter { it.chatKey == chatKey && it.state != SENDING }.map { it.id }
+        if (ids.isEmpty()) return@userChange OutboxChange.NOT_ALLOWED
+        commit(ids.associateWith { null })
+        ids.forEach { entries.remove(it); dirty -= it }
+        OutboxChange.DONE
     }
 
     /** Moves a waiting entry among the chat's waiting ones; one going out keeps its place at the front. */
-    fun move(id: String, delta: Int): Boolean = userChange {
-        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange false
+    fun move(id: String, delta: Int): OutboxChange = userChange {
+        val e = entries[id]?.takeIf { it.state != SENDING } ?: return@userChange OutboxChange.NOT_ALLOWED
         val waiting = entries.values.filter { it.chatKey == e.chatKey && it.state != SENDING }.sortedBy { it.seq }
         val from = waiting.indexOfFirst { it.id == id }
         val to = (from + delta).coerceIn(0, waiting.lastIndex)
-        if (from < 0 || to == from) return@userChange false
+        if (from < 0 || to == from) return@userChange OutboxChange.NOT_ALLOWED
         val seqs = waiting.map { it.seq }
         val reordered = waiting.toMutableList().apply { add(to, removeAt(from)) }
-        reordered.forEachIndexed { i, row -> if (row.seq != seqs[i]) put(row.copy(seq = seqs[i])) }
-        true
+        val moved = reordered.mapIndexedNotNull { i, row -> if (row.seq != seqs[i]) row.copy(seq = seqs[i]) else null }
+        // Every new place in one go: a half-written reorder never reaches the disk.
+        commit(moved.associate { it.id to encode(it) })
+        moved.forEach { entries[it.id] = it; dirty -= it.id }
+        OutboxChange.DONE
     }
 
-    /** A chat whose stored session id rotated (compression): its entries follow it. */
+    /**
+     * A chat whose stored session id rotated (compression, already done on the gateway): its entries follow it, in one
+     * write. If the disk refuses, they follow it on screen anyway (else the chat you are in would lose sight of them),
+     * [onWriteFailed] says so, and the write is tried again with the next change.
+     */
     fun rekey(oldKey: String, newKey: String, storedSessionId: String) {
         if (oldKey == newKey) return
         mutate {
-            entries.values.filter { it.chatKey == oldKey }
-                .forEach { record(it.copy(chatKey = newKey, storedSessionId = storedSessionId)) }
+            val moved = entries.values.filter { it.chatKey == oldKey }.map { it.copy(chatKey = newKey, storedSessionId = storedSessionId) }
+            if (moved.isEmpty()) return@mutate
+            moved.forEach { entries[it.id] = it }
+            try {
+                commit(moved.associate { it.id to encode(it) })
+                moved.forEach { dirty -= it.id }
+            } catch (t: Throwable) {
+                moved.forEach { dirty += it.id }
+                onWriteFailed?.invoke(t)
+            }
         }
     }
 
-    /** A queue saved in a chat's composer by an older version moves here once, in order, its holds kept. */
-    fun importLegacy(chatKey: String, storedSessionId: String, profile: String, queue: List<QueuedPrompt>) {
-        if (queue.isEmpty()) return
-        mutate {
-            queue.forEach { q ->
-                if (q.id.isBlank() || q.id in imported || entries.containsKey(q.id)) return@forEach
-                val state = when (q.hold) {
-                    QueuedPrompt.HOLD_BUSY -> BUSY
-                    QueuedPrompt.HOLD_UNCONFIRMED -> UNSURE
-                    QueuedPrompt.HOLD_NOT_SENT, QueuedPrompt.HOLD_EDIT -> NOT_SENT
-                    else -> QUEUED
-                }
-                record(OutboxEntry(id = q.id, chatKey = chatKey,
-                    storedSessionId = storedSessionId, profile = profile, text = q.text, attachments = q.attachments,
-                    seq = nextSeq++, createdAt = q.createdAt, state = state, editFailed = q.hold == QueuedPrompt.HOLD_EDIT))
-                // Then the marker (before anything can send it): once sent and gone it never comes back from the old composer.
-                runCatching { storage.write(IMPORTED + q.id, "1") }
-                imported += q.id
+    /**
+     * A queue saved in a chat's composer by an older version moves here: every entry and its marker in one durable
+     * write. True only once all of them are on disk (or already were): only then may the caller remove the old queue
+     * from the composer. False: the disk refused, nothing moved, and the old composer must keep its queue.
+     * Moved entries never go out by themselves: they wait for you as not sent (unsure stays unsure).
+     */
+    fun importLegacy(chatKey: String, storedSessionId: String, profile: String, queue: List<QueuedPrompt>): Boolean {
+        if (queue.isEmpty()) return true
+        return try {
+            mutate {
+                val fresh = queue.filter { q -> q.id.isNotBlank() && q.id !in imported && !entries.containsKey(q.id) }
+                    .distinctBy { it.id }
+                    .mapIndexed { i, q ->
+                        OutboxEntry(
+                            id = q.id, chatKey = chatKey, storedSessionId = storedSessionId, profile = profile,
+                            text = q.text, attachments = q.attachments, seq = nextSeq + i, createdAt = q.createdAt,
+                            state = if (q.hold == QueuedPrompt.HOLD_UNCONFIRMED) UNSURE else NOT_SENT,
+                            editFailed = q.hold == QueuedPrompt.HOLD_EDIT
+                        )
+                    }
+                // Entries and markers together: no marker without its entry (the message would be lost), no entry
+                // without its marker (the old composer could bring it back after it was sent).
+                commit(fresh.associate { it.id to encode(it) } + fresh.associate { IMPORTED + it.id to "1" })
+                nextSeq += fresh.size
+                fresh.forEach { entries[it.id] = it; imported += it.id }
+                true
             }
+        } catch (t: CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            false
         }
     }
 

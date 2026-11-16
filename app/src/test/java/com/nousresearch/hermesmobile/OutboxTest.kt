@@ -8,6 +8,7 @@ import com.nousresearch.hermesmobile.data.ComposerSaves
 import com.nousresearch.hermesmobile.data.GatewayNotSentException
 import com.nousresearch.hermesmobile.data.GatewayRpcException
 import com.nousresearch.hermesmobile.data.Outbox
+import com.nousresearch.hermesmobile.data.OutboxChange
 import com.nousresearch.hermesmobile.data.OutboxEdit
 import com.nousresearch.hermesmobile.data.OutboxEntry
 import com.nousresearch.hermesmobile.data.OutboxReceipt
@@ -41,11 +42,15 @@ import java.util.concurrent.ConcurrentHashMap
  * dying) can delete or skip it. Run on the real [Outbox] and [deliver] with the disk in memory.
  */
 class OutboxTest {
-    /** The disk: what a new process would read back. */
+    /** The disk: what a new process would read back. [full] makes every write fail, writing nothing (as commit() does). */
     private class Disk : OutboxStorage {
         val rows = ConcurrentHashMap<String, String>()
+        @Volatile var full = false
         override fun readAll(): Map<String, String> = HashMap(rows)
-        override fun write(id: String, value: String?) { if (value == null) rows.remove(id) else rows[id] = value }
+        override fun writeAll(changes: Map<String, String?>) {
+            check(!full) { "Could not save the outbox" }
+            changes.forEach { (id, value) -> if (value == null) rows.remove(id) else rows[id] = value }
+        }
         fun entry(id: String): OutboxEntry? = rows[id]?.let(Outbox::decode)
     }
 
@@ -89,6 +94,7 @@ class OutboxTest {
             val rows = ConcurrentHashMap<String, ChatComposerStore.State>()
             override fun load(key: String) = rows[key] ?: ChatComposerStore.State()
             override fun save(key: String, state: ChatComposerStore.State) { rows[key] = state }
+            override fun dropLegacyQueue(key: String) = Unit
         }
         val keeper = ComposerKeeper(saves, Dispatchers.Unconfined)
         saves.rows[ezra] = ChatComposerStore.State(draft = "half-typed follow-up")
@@ -170,14 +176,16 @@ class OutboxTest {
         val withFile = send("file", chat = "gw:lexi:lexi-chat", files = listOf(file))
         listOf(submittedOne, uploading, withFile).forEach { box.claim(it.id) }
         box.markSubmitted(submittedOne.id)
-        // The process dies here. A new one reads the disk.
+        // The process dies here. A new one reads the disk: nothing it finds goes out by itself.
         val after = Outbox(disk)
         assertEquals(Outbox.UNSURE, after.get(submittedOne.id)?.state)
-        assertEquals(Outbox.QUEUED, after.get(uploading.id)?.state)
+        assertEquals(Outbox.NOT_SENT, after.get(uploading.id)?.state)
         assertEquals(Outbox.NOT_SENT, after.get(withFile.id)?.state)
-        // And on disk, not only in memory.
-        assertEquals(Outbox.UNSURE, disk.entry(submittedOne.id)?.state)
+        // Whatever the disk still says, every later start reads it the same way.
+        assertEquals(Outbox.UNSURE, Outbox(disk).get(submittedOne.id)?.state)
+        assertEquals(Outbox.NOT_SENT, Outbox(disk).get(uploading.id)?.state)
         assertNull(after.next(ezra, idle = true))
+        assertNull(after.next(nova, idle = true))
     }
 
     @Test fun aLateSessionNotOwnedIsKeptAsNotSent() = runBlocking {
@@ -188,7 +196,7 @@ class OutboxTest {
         assertEquals(Outbox.NOT_SENT, Outbox(disk).get(entry.id)?.state)
         assertNull(box.next(ezra, idle = true))
         // Send again: it waits its turn as new, at its place.
-        assertTrue(box.retry(entry.id))
+        assertEquals(OutboxChange.DONE, box.retry(entry.id))
         assertEquals(entry.id, box.next(ezra, idle = true)?.id)
     }
 
@@ -207,7 +215,7 @@ class OutboxTest {
         assertNull(box.claim(call.id))
         assertEquals(listOf(QueuedPrompt.HOLD_UNCONFIRMED, null, null), box.view(ezra).map { it.hold })
         // Only you resolve it: removing it lets the next one go.
-        assertTrue(box.discard(head.id))
+        assertEquals(OutboxChange.DONE, box.discard(head.id))
         assertEquals(second.id, box.next(ezra, idle = true)?.id)
     }
 
@@ -259,8 +267,8 @@ class OutboxTest {
         assertNull(box.next(ezra, idle = true))
         assertNotNull(box.claim(other.id))
         // A message going out cannot be removed, moved or edited out from under its sender.
-        assertFalse(box.discard(a.id))
-        assertFalse(box.update(a.id, "x"))
+        assertEquals(OutboxChange.NOT_ALLOWED, box.discard(a.id))
+        assertEquals(OutboxChange.NOT_ALLOWED, box.update(a.id, "x"))
         box.discardAll(ezra)
         assertEquals(listOf(a.id), box.entries(ezra).map { it.id })
     }
@@ -269,7 +277,7 @@ class OutboxTest {
         val a = send("a")
         val b = send("b")
         val c = send("c")
-        assertTrue(box.move(c.id, -2))
+        assertEquals(OutboxChange.DONE, box.move(c.id, -2))
         assertEquals(listOf(c.id, a.id, b.id), Outbox(disk).entries(ezra).map { it.id })
         box.rekey(ezra, "gw:ezra:compressed", "compressed")
         assertTrue(box.entries(ezra).isEmpty())
@@ -283,13 +291,16 @@ class OutboxTest {
             QueuedPrompt("q2", "second"),
             QueuedPrompt("q3", "edit", hold = QueuedPrompt.HOLD_EDIT)
         )
-        box.importLegacy(ezra, "ezra-chat", "ezra", legacy)
-        assertEquals(listOf(Outbox.UNSURE, Outbox.QUEUED, Outbox.NOT_SENT), box.entries(ezra).map { it.state })
+        assertTrue(box.importLegacy(ezra, "ezra-chat", "ezra", legacy))
+        // Moved in, none of them goes out by itself: not sent until you tap (unsure stays unsure).
+        assertEquals(listOf(Outbox.UNSURE, Outbox.NOT_SENT, Outbox.NOT_SENT), box.entries(ezra).map { it.state })
+        assertNull(box.next(ezra, idle = true))
         // Resolve and send q1 and q2; the old composer still holds them (its rewrite did not reach the disk).
         box.discard("q1")
+        assertEquals(OutboxChange.DONE, box.retry("q2"))
         box.claim("q2")
         box.deliver("q2", receipt) { submitting -> submitting(); "adm" }
-        Outbox(disk).importLegacy(ezra, "ezra-chat", "ezra", legacy)
+        assertTrue(Outbox(disk).importLegacy(ezra, "ezra-chat", "ezra", legacy))
         assertEquals(listOf("q3"), Outbox(disk).entries(ezra).map { it.id })
     }
 
@@ -303,15 +314,7 @@ class OutboxTest {
     }
 
     @Test fun aDiskThatRefusesNeverLetsAMessageGoOutUnrecorded() = runBlocking {
-        val flaky = object : OutboxStorage {
-            val rows = ConcurrentHashMap<String, String>()
-            @Volatile var full = false
-            override fun readAll(): Map<String, String> = HashMap(rows)
-            override fun write(id: String, value: String?) {
-                check(!full) { "Could not save the outbox" }
-                if (value == null) rows.remove(id) else rows[id] = value
-            }
-        }
+        val flaky = Disk()
         val b = Outbox(flaky)
         // Not written: not accepted (the composer keeps the text), and nothing half-made stays behind.
         flaky.full = true
@@ -328,10 +331,10 @@ class OutboxTest {
         assertFalse(wentOut)
         assertEquals(Outbox.NOT_SENT, b.get(e.id)?.state)
         // A user change the disk refuses changes nothing and says so.
-        assertFalse(b.discard(e.id))
+        assertEquals(OutboxChange.NOT_SAVED, b.discard(e.id))
         assertNotNull(b.get(e.id))
-        // On disk it is still "sending, not submitted": the next start puts it back to wait (it never went out).
-        assertEquals(Outbox.QUEUED, Outbox(flaky).get(e.id)?.state)
+        // On disk it is still "sending, not submitted": the next start shows it as not sent (never sends it by itself).
+        assertEquals(Outbox.NOT_SENT, Outbox(flaky).get(e.id)?.state)
     }
 
     @Test fun theDiskFormatRoundTrips() {

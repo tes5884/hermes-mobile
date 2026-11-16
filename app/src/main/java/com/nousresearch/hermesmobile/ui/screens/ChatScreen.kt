@@ -98,7 +98,7 @@ fun ChatScreen(
     onAttach: (List<Uri>) -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRemoveQueued: (String) -> Unit,
-    onUpdateQueued: (String, String) -> Unit,
+    onUpdateQueued: (String, String) -> Boolean,
     onMoveQueued: (String, Int) -> Unit,
     onClearQueue: () -> Unit,
     onRetryQueued: (String) -> Unit = {},

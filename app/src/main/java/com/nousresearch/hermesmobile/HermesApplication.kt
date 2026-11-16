@@ -58,14 +58,15 @@ class HermesApplication : Application(), ViewModelStoreOwner {
         runCatching { com.nousresearch.hermesmobile.push.FirebaseRuntime.ensureInitialized(this) }
         com.nousresearch.hermesmobile.update.AppUpdates.schedule(this)
         // Capture leftovers before any screen can start a new recording. Never touch arbitrary cache files, nor a file a
-        // message in the outbox still has to send (a voice note waiting there).
-        val outboxFiles = runCatching { com.nousresearch.hermesmobile.data.Outboxes.get(this).referencedAttachmentUris() }.getOrDefault(emptySet())
-        val oldAudio = cacheDir.listFiles()?.filter { it.name.startsWith("hermes-voice-") || it.name.startsWith("hermes-speech-") || it.name.startsWith("hermes-call-") }
+        // message in the outbox still has to send (a voice note waiting there). Not known for sure (the outbox could not
+        // be opened or read whole): nothing is cleaned up this time.
+        val outboxFiles = com.nousresearch.hermesmobile.data.Outboxes.filesToKeep(this)
+        val oldAudio = if (outboxFiles == null) emptyList() else cacheDir.listFiles()?.filter { it.name.startsWith("hermes-voice-") || it.name.startsWith("hermes-speech-") || it.name.startsWith("hermes-call-") }
             .orEmpty().filterNot { android.net.Uri.fromFile(it).toString() in outboxFiles }
         Thread({
             oldAudio.forEach { it.delete() }
             // Snapshot old imports only; new imports and all persisted drafts/queues/outbox entries are protected.
-            runCatching {
+            if (outboxFiles != null) runCatching {
                 val used = com.nousresearch.hermesmobile.data.ChatComposerStore(this).referencedAttachmentUris() + outboxFiles
                 java.io.File(filesDir, "incoming").listFiles()?.filter {
                     System.currentTimeMillis() - it.lastModified() > 24 * 60 * 60 * 1000L &&

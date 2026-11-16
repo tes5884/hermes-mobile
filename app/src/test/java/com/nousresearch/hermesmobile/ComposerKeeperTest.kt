@@ -31,6 +31,7 @@ class ComposerKeeperTest {
             return read
         }
         override fun save(key: String, state: ChatComposerStore.State) { rows[key] = state }
+        override fun dropLegacyQueue(key: String) { rows[key]?.let { rows[key] = it.copy(queue = emptyList()) } }
     }
 
     private val saves = Saves()

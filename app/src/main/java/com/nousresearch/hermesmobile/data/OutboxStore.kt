@@ -52,10 +52,22 @@ object LocalCipher {
 /** The one outbox of this process (the ViewModel and the cache cleanup share it; two would fight over the file). */
 object Outboxes {
     @Volatile private var instance: Outbox? = null
+    @Volatile private var storage: PrefsOutboxStorage? = null
 
     fun get(context: Context): Outbox = instance ?: synchronized(this) {
-        instance ?: Outbox(PrefsOutboxStorage(context.applicationContext)).also { instance = it }
+        instance ?: PrefsOutboxStorage(context.applicationContext).let { disk ->
+            Outbox(disk).also { storage = disk; instance = it }
+        }
     }
+
+    /**
+     * Files the outbox needs, or null when that is not known for sure (it could not be opened, or some rows could not
+     * be read): then nothing may be cleaned up.
+     */
+    fun filesToKeep(context: Context): Set<String>? = runCatching {
+        val box = get(context)
+        box.referencedAttachmentUris().takeIf { storage?.unreadable == 0 }
+    }.getOrNull()
 }
 
 /**
@@ -64,14 +76,23 @@ object Outboxes {
  */
 class PrefsOutboxStorage(context: Context) : OutboxStorage {
     private val prefs = context.getSharedPreferences("hermes_mobile_outbox", Context.MODE_PRIVATE)
+    /** Rows the last [readAll] could not read (the Keystore refused): their files must not be cleaned up. */
+    @Volatile var unreadable = 0
+        private set
 
-    override fun readAll(): Map<String, String> = prefs.all.mapNotNull { (id, value) ->
-        (value as? String)?.let { runCatching { id to LocalCipher.decrypt(it) }.getOrNull() }
-    }.toMap()
+    override fun readAll(): Map<String, String> {
+        var failed = 0
+        val rows = prefs.all.mapNotNull { (id, value) ->
+            (value as? String)?.let { runCatching { id to LocalCipher.decrypt(it) }.onFailure { failed++ }.getOrNull() }
+        }.toMap()
+        unreadable = failed
+        return rows
+    }
 
-    override fun write(id: String, value: String?) {
+    /** One editor, one commit(): every change in it lands together or none does (SharedPreferences writes the file whole). */
+    override fun writeAll(changes: Map<String, String?>) {
         val edit = prefs.edit()
-        if (value == null) edit.remove(id) else edit.putString(id, LocalCipher.encrypt(value))
+        changes.forEach { (id, value) -> if (value == null) edit.remove(id) else edit.putString(id, LocalCipher.encrypt(value)) }
         check(edit.commit()) { "Could not save the outbox" }
     }
 }

@@ -232,17 +232,21 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private val composerStore = ChatComposerStore(application)
     /** Saves a chat's draft only once that chat's own draft is on screen (Shomer t_478c28f5). */
     private val composerKeeper = com.nousresearch.hermesmobile.data.ComposerKeeper(composerStore)
+        .also { keeper -> keeper.onSaveFailed = { onMain { uiState = uiState.copy(error = string(R.string.draft_save_failed)) } } }
     /**
      * Every message you send, from the moment you press send until the gateway confirms it (Tzvi 2026-11-15, Shomer
      * t_478c28f5): one per process, on disk, never written by the composer. The open chat's queue lane is drawn from it.
      */
-    private val onOutboxChange: () -> Unit = {
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) refreshOutboxView()
-        else mainHandler.post { refreshOutboxView() }
-    }
+    private val onOutboxChange: () -> Unit = { onMain { refreshOutboxView() } }
+    /** The disk refused to record what happened to a message: the chat says so (Tzvi 2026-11-15, Shomer t_737920a6). */
+    private val onOutboxWriteFailed: (Throwable) -> Unit = { onMain { uiState = uiState.copy(error = string(R.string.outbox_write_failed)) } }
     private val outbox = com.nousresearch.hermesmobile.data.Outboxes.get(application)
-        .also { box -> box.onChange = onOutboxChange }
+        .also { box -> box.onChange = onOutboxChange; box.onWriteFailed = onOutboxWriteFailed }
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private fun onMain(block: () -> Unit) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) block() else mainHandler.post(block)
+    }
     private var repository: HermesRepository? = null
     private var readyWaiter: CompletableDeferred<Unit>? = null
 
@@ -1754,9 +1758,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         if (inserted.length <= LARGE_PASTE_CHARS || before.length - prefix - suffix > 0) return false
         if (uiState.composerAttachments.size >= MAX_COMPOSER_ATTACHMENTS) return false
         val dir = java.io.File(getApplication<Application>().filesDir, "composer-pastes").apply { mkdirs() }
-        // Pastes live until sent; drop the ones left behind by drafts abandoned a week ago (never one the outbox holds).
-        val held = outbox.referencedAttachmentUris()
-        dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 7L * 24 * 3600 * 1000 && Uri.fromFile(it).toString() !in held }?.forEach { it.delete() }
+        // Pastes live until sent; drop the ones left behind by drafts abandoned a week ago (never one the outbox or a
+        // saved draft holds, and none at all while the outbox cannot say for sure which it holds).
+        com.nousresearch.hermesmobile.data.Outboxes.filesToKeep(getApplication())?.let { outboxFiles ->
+            val held = outboxFiles + runCatching { composerStore.referencedAttachmentUris() }.getOrElse { return@let }
+            dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 7L * 24 * 3600 * 1000 && Uri.fromFile(it).toString() !in held }?.forEach { it.delete() }
+        }
         val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.ROOT).format(java.util.Date())
         val file = java.io.File(dir, "pasted_content_${stamp}_${UUID.randomUUID().toString().take(6)}.txt")
         runCatching { file.writeText(inserted) }.onFailure { return false }
@@ -1790,20 +1797,34 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     /** You removed a waiting message (never one going out). What waited behind it may go now. */
     fun removeQueuedPrompt(id: String) {
-        if (outbox.discard(id)) drainIdleChatSoon()
+        afterQueueChange(outbox.discard(id), R.string.queue_clear_failed)
     }
 
     /**
      * You edited a waiting message. Saving an edit of a held one (not sent, not sure it sent, an edit not applied) is
      * the choice to send it again: it goes first, then what waited behind it.
      */
-    fun updateQueuedPrompt(id: String, text: String) {
-        if (outbox.update(id, text)) drainIdleChatSoon()
+    fun updateQueuedPrompt(id: String, text: String): Boolean {
+        val result = outbox.update(id, text)
+        afterQueueChange(result, R.string.queue_change_failed)
+        return result != com.nousresearch.hermesmobile.data.OutboxChange.NOT_SAVED
     }
 
     /** Send again: a held message (not sent, not sure it sent) waits for its turn again, at its place. */
     fun retryQueuedPrompt(id: String) {
-        if (outbox.retry(id)) drainIdleChatSoon()
+        afterQueueChange(outbox.retry(id), R.string.queue_change_failed)
+    }
+
+    /**
+     * What a change you made to the queue did: done, the chat drains; the disk refused it, nothing changed (the entry
+     * is still there, as it was) and the chat says so (Tzvi 2026-11-15: a failed write stops and says so).
+     */
+    private fun afterQueueChange(result: com.nousresearch.hermesmobile.data.OutboxChange, failed: Int) {
+        when (result) {
+            com.nousresearch.hermesmobile.data.OutboxChange.DONE -> drainIdleChatSoon()
+            com.nousresearch.hermesmobile.data.OutboxChange.NOT_SAVED -> uiState = uiState.copy(error = string(failed))
+            com.nousresearch.hermesmobile.data.OutboxChange.NOT_ALLOWED -> Unit
+        }
     }
 
     /** The chat on screen is idle and its outbox may go on: drain it. */
@@ -1813,11 +1834,15 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun moveQueuedPrompt(id: String, delta: Int) {
         // You may have moved something ahead of a held message: that may go now.
-        if (outbox.move(id, delta)) drainIdleChatSoon()
+        afterQueueChange(outbox.move(id, delta), R.string.queue_change_failed)
     }
 
+    /** Clear: off the disk first, all together, then off the screen; if the disk refuses, all stay and it says so. */
     fun clearQueuedPrompts() {
-        activeOutboxKey()?.let(outbox::discardAll)
+        val key = activeOutboxKey() ?: return
+        if (outbox.discardAll(key) == com.nousresearch.hermesmobile.data.OutboxChange.NOT_SAVED) {
+            uiState = uiState.copy(error = string(R.string.queue_clear_failed))
+        }
     }
 
     fun refreshSessionMeta() {
@@ -1997,11 +2022,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 true
             } ?: return@launch
             if (saved.queue.isNotEmpty()) {
-                // A queue an older version kept in this composer moves into the outbox once, then the composer is
-                // saved without it.
-                outbox.importLegacy(key, chat.storedSessionId, chat.profile, saved.queue)
-                persistCurrentComposerNow()
-            } else if (draft.isNotBlank()) persistComposerSoon()
+                // A queue an older version kept in this composer moves into the outbox, and leaves the composer only
+                // once the outbox has it on disk (Shomer t_737920a6). If the outbox cannot write it, the composer keeps
+                // it untouched (the next open tries again) and the chat says so.
+                val moved = composerKeeper.migrateLegacy(key) { queue ->
+                    outbox.importLegacy(key, chat.storedSessionId, chat.profile, queue)
+                }
+                if (moved == com.nousresearch.hermesmobile.data.LegacyMove.KEPT) {
+                    uiState = uiState.copy(error = string(R.string.queue_import_failed))
+                }
+            }
+            if (draft.isNotBlank()) persistComposerSoon()
             refreshSessionMeta()
             // Its turn ended while the chat was closed: what was queued for it goes out now.
             uiState.activeChat?.takeIf { !it.readOnly && !it.running }?.let { drainQueuedPromptSoon(it.runtimeSessionId) }
@@ -5284,6 +5315,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         persistCurrentComposerNow()
         // The outbox outlives this ViewModel (sends still going out settle themselves in it); it stops calling us.
         if (outbox.onChange == onOutboxChange) outbox.onChange = null
+        if (outbox.onWriteFailed == onOutboxWriteFailed) outbox.onWriteFailed = null
         readyWaiter?.cancel()
         streamFlushJob?.cancel()
         sessionSearchJob?.cancel()

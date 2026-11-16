@@ -14,4 +14,10 @@
     <string name="queue_kept_in_chat">Not sent to %1$s. It is kept in that chat.</string>
     <string name="queue_kept_in_chat_generic">A message was not sent. It is kept in its chat.</string>
     <string name="gateway_approval_already">That approval was already answered or has ended.</string>
+    <!-- A failed write on the phone stops and says so (t_6317f647). -->
+    <string name="queue_clear_failed">Couldn\'t clear: the phone could not save the change. Nothing was removed.</string>
+    <string name="queue_change_failed">Couldn\'t save that change on the phone. Nothing was changed.</string>
+    <string name="queue_import_failed">Couldn\'t move this chat\'s saved messages into the outbox. They are kept as they were; open the chat again to retry.</string>
+    <string name="outbox_write_failed">The phone could not save a message\'s status. It is kept, and after a restart it shows as not sent (it never sends by itself).</string>
+    <string name="draft_save_failed">Couldn\'t save your draft on the phone.</string>
 </resources>
