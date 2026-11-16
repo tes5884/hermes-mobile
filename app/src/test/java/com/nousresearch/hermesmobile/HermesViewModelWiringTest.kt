@@ -108,4 +108,21 @@ class HermesViewModelWiringTest {
         assertTrue(searching.surface == null)
         assertFalse(searching.showsBotChatOf("ezra", "c1"))
     }
+
+    /**
+     * A live call is bound to its bot chat and ends in the same choke points as other per-chat state: every
+     * navigation intent hangs up before the screen changes, and the reconcile hangs up once the bound chat is not what
+     * is on screen. While it runs the gateway socket stays up with the screen off, and its turns are voice turns.
+     */
+    @Test fun aLiveCallEndsInTheChatChangeChokePoints() {
+        assertTrue(body("private fun navigate()").contains("voiceEngine?.chatClosed()"))
+        val reconcile = body("private fun reconcileChatChange()")
+        assertTrue(reconcile.contains("voiceBinding?.let { if (!it.stillOn(view)) voiceEngine?.chatClosed() }"))
+        assertTrue(body("fun onEnvironmentChanged(").contains("screen || voiceEngine != null"))
+        assertTrue(body("private fun submitVoiceTurn(").contains("voiceTurn = true"))
+        // Nothing but the call screen's tap answers an approval: the call code never calls the approval answer.
+        val call = source.substring(source.indexOf("live voice call (chained loop + barge-in)"), source.indexOf("    fun stopTurn() {"))
+        assertFalse(call.contains("answerInlineApproval"))
+        assertFalse(call.contains("respondApproval"))
+    }
 }

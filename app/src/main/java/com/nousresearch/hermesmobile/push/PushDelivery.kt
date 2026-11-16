@@ -386,7 +386,9 @@ class PushSyncWorker(context: Context, params: WorkerParameters) : CoroutineWork
 object AppPresence {
     @Volatile var foreground: Boolean = false
     @Volatile var openSessionId: String? = null
-    fun isShowing(sessionId: String): Boolean = foreground && openSessionId == sessionId
+    /** The chat a live voice call is talking to (stored and runtime ids): its answers are being spoken, screen on or off. */
+    @Volatile var callSessions: Set<String> = emptySet()
+    fun isShowing(sessionId: String): Boolean = (foreground && openSessionId == sessionId) || sessionId in callSessions
 }
 
 /** No-agent cron deliveries arrive as "Hermes reminder" with a "Cronjob Response: <job> (job_id: …)" header line. */

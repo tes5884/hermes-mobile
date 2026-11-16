@@ -677,8 +677,26 @@ private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, listening: Boole
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            bot.onCall?.let { call -> CallButton(bot.profile.label, call) }
         }
         HorizontalDivider(color = MaterialTheme.hermes.line)
+    }
+}
+
+/** The bot header's call button: asks for the microphone first, then starts the live voice call. */
+@Composable
+private fun CallButton(botName: String, onCall: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val needed = stringResource(R.string.call_mic_needed)
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) onCall() else android.widget.Toast.makeText(context, needed, android.widget.Toast.LENGTH_SHORT).show()
+    }
+    IconButton(onClick = {
+        val has = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (has) onCall() else permission.launch(android.Manifest.permission.RECORD_AUDIO)
+    }) {
+        Icon(Icons.Filled.Call, stringResource(R.string.call_button, botName))
     }
 }
 

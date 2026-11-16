@@ -97,7 +97,9 @@ class HermesRepository(
         text: String,
         rewind: EditingTurn? = null,
         confirmDeep: Boolean = false,
-        queued: Boolean = false
+        queued: Boolean = false,
+        voiceTurn: Boolean = false,
+        interrupted: Boolean = false
     ): PromptSubmitResult {
         val params = JSONObject()
             .put("session_id", runtimeId)
@@ -105,6 +107,10 @@ class HermesRepository(
             .put("text", text)
             .put("surface", "mobile")
         if (queued) params.put("queued", true)
+        // A live call's turn: the transcript of what was said (Hermes routes it to auxiliary.voice_chat), and after a
+        // barge-in the note that the spoken reply was cut off (both are prompt.submit fields the gateway reads).
+        if (voiceTurn) params.put("voice_turn", true)
+        if (interrupted) params.put("interrupted", true)
         if (rewind != null) {
             params.put("confirm_truncate", true).put("truncate_before_user_ordinal", rewind.ordinal)
             rewind.rowId?.let { params.put("truncate_before_row_id", it) }
