@@ -39,9 +39,25 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
         // Lets the push service skip a turn notice for the chat the user is reading right now.
         val openChat = if (s.section == MainSection.CHAT) s.activeChat?.storedSessionId
             else if (s.section == MainSection.BOTS) s.activeGroup?.room?.roomId?.let { "room:$it" } else null
-        DisposableEffect(openChat) {
+        // Opening a chat, or coming back to the app with it open, clears that chat's notices from the shade (any route,
+        // not only a notification tap). ON_RESUME is replayed on addObserver, so a chat opened while resumed clears too.
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+        val openConnection = s.activeConnectionId.orEmpty()
+        DisposableEffect(openChat, openConnection, lifecycleOwner) {
             com.nousresearch.hermesmobile.push.AppPresence.openSessionId = openChat
-            onDispose { com.nousresearch.hermesmobile.push.AppPresence.openSessionId = null }
+            val clearOnResume = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && openChat != null) {
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { com.nousresearch.hermesmobile.push.PushClear.clear(appContext, openChat, openConnection) }
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(clearOnResume)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(clearOnResume)
+                com.nousresearch.hermesmobile.push.AppPresence.openSessionId = null
+            }
         }
         val uriHandler = LocalUriHandler.current
         androidx.compose.runtime.LaunchedEffect(s.authLaunchUrl) {

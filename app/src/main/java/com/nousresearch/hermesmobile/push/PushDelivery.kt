@@ -196,6 +196,12 @@ object PushDelivery {
             }
         }
         if (shortcut != null) builder.setShortcutId(shortcut).setLocusId(androidx.core.content.LocusIdCompat(shortcut))
+        // Which chat this notice is about, so opening that chat in the app clears it (PushClear).
+        builder.addExtras(android.os.Bundle().apply {
+            putString(PushClear.EXTRA_SESSION, event?.optString("session_id").orEmpty())
+            putString(PushClear.EXTRA_CONNECTION, connection)
+            putString(PushClear.EXTRA_PROFILE, profile)
+        })
         if (merged != null) {
             // The file that followed this text: an action button that downloads and opens it.
             val fileIntent = Intent(context, MainActivity::class.java).setAction("hermes.notification")
@@ -248,6 +254,12 @@ object PushDelivery {
         if (event.optString("profile").isBlank() || !PushGrouping.shouldMerge(textBot, saved.optLong("at"), fileBot, System.currentTimeMillis())) return false
         if (nm.activeNotifications.none { it.tag == textId }) return false
         return show(context, textId, text, MergedFile(event.optString("event_id"), PushMedia.name(files.first())))
+    }
+
+    /** Re-counts a bot's group summary after some of its notices were cleared (silent: the summary never alerts). */
+    fun refreshSummary(context: Context, profile: String, connection: String) {
+        if (!permitted(context)) return
+        postSummary(context, context.getSystemService(NotificationManager::class.java), profile, connection, 0xFF0053FD.toInt())
     }
 
     private fun postSummary(context: Context, nm: NotificationManager, profile: String, connection: String, accent: Int) {
