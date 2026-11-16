@@ -66,9 +66,12 @@ private fun ActivityPanel(steps: List<ActivityStep>) {
         else -> R.string.activity_title
     })
     val summary = if(toolCount > 0) stringResource(R.string.activity_tool_count, toolCount) else ""
+    // While a turn runs, the pill says what it is doing right now (the newest running step), not just "Working".
+    val current = steps.lastOrNull { it.status in setOf("running", "generating") }?.let { activityName(it) }.orEmpty()
     Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        DashedDivider(Modifier.weight(1f))
+        // Short rules either side: the pill gets the width it needs (it used to get a third and cut its text off).
+        DashedDivider(Modifier.weight(.12f))
         Surface(
             color = when {
                 failed -> MaterialTheme.hermes.redTint
@@ -94,16 +97,18 @@ private fun ActivityPanel(steps: List<ActivityStep>) {
                 if (running) ThinkingIndicator(dotSize = 5.dp, spacing = 3.dp)
                 else Icon(if (failed) Icons.Default.ErrorOutline else Icons.Default.CheckCircleOutline, null, Modifier.size(14.dp))
                 Text(
-                    if (running || failed) listOf(label, summary).filter { it.isNotBlank() }.joinToString(" · ")
+                    if (running) listOf(label, current, summary).filter { it.isNotBlank() }.distinct().joinToString(" · ")
+                    else if (failed) listOf(label, summary).filter { it.isNotBlank() }.joinToString(" · ")
                     else summary.ifBlank { label },
                     style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
                 Icon(Icons.Default.ChevronRight, null, Modifier.size(14.dp))
             }
         }
-        DashedDivider(Modifier.weight(1f))
+        DashedDivider(Modifier.weight(.12f))
     }
     if(open) ModalBottomSheet(onDismissRequest = { open = false }) {
         Column(Modifier.fillMaxWidth()) {

@@ -21,6 +21,26 @@ import com.nousresearch.hermesmobile.ui.theme.hermes
 /** Width from which the list and the open conversation sit side by side, like Desktop. */
 private val TwoPaneMinWidth = 760.dp
 
+/**
+ * The bot whose one continuous chat [chat] is: opened as a bot chat, or its id is the bot's canonical Bot Chat
+ * (a push tap or a restored page opens it as a plain session). Null for side chats and plain sessions.
+ */
+internal fun botChatProfile(chat: ActiveChat, profiles: List<HermesProfile>): HermesProfile? =
+    profiles.firstOrNull { p ->
+        p.name == chat.profile && p.isBot &&
+            (chat.botChat || chat.storedSessionId == p.canonicalSession || chat.storedSessionId == p.canonicalResolvedSession)
+    }
+
+/** What the bot header of a bot's chat shows; tapping it opens [onDetails]. Also carries the chat's inline approval cards. */
+internal class BotChatHeader(
+    val profile: HermesProfile,
+    val avatar: String?,
+    val dot: SessionDot,
+    val onDetails: () -> Unit,
+    val approvals: List<ApprovalCards.Card> = emptyList(),
+    val onApproval: (requestId: String, choice: String) -> Unit = { _, _ -> }
+)
+
 @Composable
 fun ChatScreen(
     profiles: List<HermesProfile>,
@@ -88,7 +108,14 @@ fun ChatScreen(
     onBack: () -> Unit,
     onMenu: () -> Unit = {},
     routines: RoutineActions? = null,
-    listHeader: @Composable () -> Unit = {}
+    listHeader: @Composable () -> Unit = {},
+    /** Avatars by profile name, for the bot header of a bot's chat. */
+    botAvatars: Map<String, String> = emptyMap(),
+    /** The bot header's tap target: that bot's details (its editor until Bot details exists). */
+    onBotDetails: (HermesProfile) -> Unit = {},
+    /** Inline approval cards of the open bot chat, and the answer to one (request id, once|always|deny). */
+    approvalCards: List<ApprovalCards.Card> = emptyList(),
+    onApproval: (String, String) -> Unit = { _, _ -> }
 ) {
     var showNew by remember { mutableStateOf(false) }
 
@@ -147,7 +174,11 @@ fun ChatScreen(
         slashPalette = slashPalette,
         commandOutput = commandOutput,
         actions = threadActions,
-        twoPane = twoPane
+        twoPane = twoPane,
+        bot = botChatProfile(chat, profiles)?.let { profile ->
+            BotChatHeader(profile, botAvatars[profile.name], LiveSessions.dotFor(sessionDots, chat.storedSessionId), { onBotDetails(profile) },
+                approvalCards, onApproval)
+        }
     )
 
     BoxWithConstraints(Modifier.fillMaxSize()) {

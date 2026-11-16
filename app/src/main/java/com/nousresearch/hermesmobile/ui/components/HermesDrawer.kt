@@ -100,9 +100,10 @@ fun HermesDrawer(
             Spacer(Modifier.height(6.dp))
             DrawerItem(Icons.Default.Search, stringResource(R.string.palette_open), false) { onClose(); onSearch() }
 
+            // Bot-first: the bots page is the start page and leads the menu; the old dashboard and the chat list follow.
+            DrawerItem(Icons.Default.SmartToy, stringResource(R.string.ui_f17c0acbd8), current == MainSection.BOTS) { onClose(); onSelect(MainSection.BOTS) }
             DrawerItem(Icons.Default.SpaceDashboard, stringResource(R.string.a14_home), current == MainSection.HOME) { onClose(); onSelect(MainSection.HOME) }
             DrawerItem(Icons.AutoMirrored.Filled.Chat, stringResource(R.string.ui_ef5b4049bb), current == MainSection.CHAT) { onClose(); onSelect(MainSection.CHAT) }
-            DrawerItem(Icons.Default.SmartToy, stringResource(R.string.ui_f17c0acbd8), current == MainSection.BOTS) { onClose(); onSelect(MainSection.BOTS) }
             if (kanbanAvailable) DrawerItem(Icons.Default.ViewKanban, stringResource(R.string.kanban_title), current == MainSection.KANBAN) { onClose(); onKanban() }
 
             // Desktop's sidebar is primarily the session list; mirror its most recent rows here.

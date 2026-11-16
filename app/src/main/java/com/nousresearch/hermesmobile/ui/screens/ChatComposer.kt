@@ -148,7 +148,11 @@ internal fun ChatComposer(
     onContext: () -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
-    onSteer: (String) -> Unit
+    onSteer: (String) -> Unit,
+    /** Set in a bot's one chat: the mock's composer (+, pill field, 60dp hold-to-talk mic) instead of the desktop card. */
+    botName: String? = null,
+    /** The bot composer reports a running recording, so the bot header can say "Listening…". */
+    onRecordingChange: (Boolean) -> Unit = {}
 ) {
     var composerMenu by remember(chat.storedSessionId, chat.profile) { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
@@ -157,6 +161,15 @@ internal fun ChatComposer(
     val rig = rememberVoiceNoteRig(ChatConversationIdentity.from(chat)) { f, ms -> voiceNotes?.onSendVoice?.invoke(f, ms) ?: f.delete() }
     val cancelWidthPx = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val holdMic = voiceNotes != null && !chat.readOnly
+    if (botName != null) {
+        BotComposer(
+            botName = botName, chat = chat, draft = draft, attachments = attachments, voice = voice, rig = rig,
+            holdMic = holdMic, cancelWidthPx = cancelWidthPx, onDraftChange = onDraftChange,
+            onRemoveAttachment = onRemoveAttachment, onAttach = onAttach, onTakePhoto = onTakePhoto, onModel = onModel,
+            onContext = onContext, onSend = onSend, onStop = onStop, onSteer = onSteer, onRecordingChange = onRecordingChange
+        )
+        return
+    }
     Surface(
         modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
         shape = RoundedCornerShape(24.dp),
@@ -213,34 +226,11 @@ internal fun ChatComposer(
                 if (rig.recording) RecordingBar(rig.recordingMs ?: 0L, rig.levels, rig.locked, rig.dragX, onCancel = rig.cancelRecording, onSend = rig.finishRecording, modifier = Modifier.weight(1f))
                 else Box {
                     IconButton(onClick = { composerMenu = true }) { Icon(Icons.Default.Add, stringResource(R.string.chat_more_actions)) }
-                    DropdownMenu(expanded = composerMenu, onDismissRequest = { composerMenu = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) },
-                            leadingIcon = { Icon(Icons.Default.AttachFile, null) },
-                            enabled = attachments.size < 6,
-                            onClick = { composerMenu = false; onAttach() })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) },
-                            leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
-                            enabled = attachments.size < 6,
-                            onClick = { composerMenu = false; onTakePhoto() })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.a22_commands)) },
-                            leadingIcon = { Icon(Icons.Default.Code, null) },
-                            onClick = { composerMenu = false; if (!draft.startsWith("/")) onDraftChange("/") })
-                        if (voice != null) {
-                            DropdownMenuItem(text = { Text(stringResource(R.string.chat_dictate)) },
-                                leadingIcon = { Icon(Icons.Default.Mic, null) },
-                                enabled = !voice.busy && !voice.speaking && !voice.recording,
-                                onClick = { composerMenu = false; voice.dictate() })
-                            DropdownMenuItem(text = { Text(stringResource(R.string.chat_read_aloud)) },
-                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, null) },
-                                enabled = voice.canSpeak && !voice.speaking,
-                                onClick = { composerMenu = false; voice.speak() })
-                        }
-                        if (chat.running) DropdownMenuItem(
-                            text = { Text(stringResource(R.string.chat_steer)) },
-                            leadingIcon = { Icon(Icons.Default.TurnRight, null) },
-                            enabled = draft.isNotBlank() && attachments.isEmpty(),
-                            onClick = { composerMenu = false; onSteer(draft); onDraftChange("") })
-                    }
+                    ComposerMenu(
+                        expanded = composerMenu, onDismiss = { composerMenu = false }, chat = chat, draft = draft,
+                        attachments = attachments, voice = voice, onDraftChange = onDraftChange, onAttach = onAttach,
+                        onTakePhoto = onTakePhoto, onSteer = onSteer
+                    )
                 }
                 if (!rig.recording) Box(Modifier.weight(1f)) { ModelPill(chat, enabled = !chat.running, onClick = onModel) }
                 if (!rig.recording) ComposerContextRing(sessionUsage, onContext)
@@ -272,6 +262,59 @@ internal fun ChatComposer(
                 }
             }
         }
+    }
+}
+
+/** The composer's + menu: attach, photo, commands, dictate/read aloud, steer; the bot composer adds model and context. */
+@Composable
+internal fun ComposerMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    chat: ActiveChat,
+    draft: String,
+    attachments: List<ComposerAttachment>,
+    voice: VoiceActions?,
+    onDraftChange: (String) -> Unit,
+    onAttach: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onSteer: (String) -> Unit,
+    onModel: (() -> Unit)? = null,
+    onContext: (() -> Unit)? = null
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(text = { Text(stringResource(R.string.chat_attach)) },
+            leadingIcon = { Icon(Icons.Default.AttachFile, null) },
+            enabled = attachments.size < 6,
+            onClick = { onDismiss(); onAttach() })
+        DropdownMenuItem(text = { Text(stringResource(R.string.chat_take_photo)) },
+            leadingIcon = { Icon(Icons.Default.PhotoCamera, null) },
+            enabled = attachments.size < 6,
+            onClick = { onDismiss(); onTakePhoto() })
+        DropdownMenuItem(text = { Text(stringResource(R.string.a22_commands)) },
+            leadingIcon = { Icon(Icons.Default.Code, null) },
+            onClick = { onDismiss(); if (!draft.startsWith("/")) onDraftChange("/") })
+        if (voice != null) {
+            DropdownMenuItem(text = { Text(stringResource(R.string.chat_dictate)) },
+                leadingIcon = { Icon(Icons.Default.Mic, null) },
+                enabled = !voice.busy && !voice.speaking && !voice.recording,
+                onClick = { onDismiss(); voice.dictate() })
+            DropdownMenuItem(text = { Text(stringResource(R.string.chat_read_aloud)) },
+                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, null) },
+                enabled = voice.canSpeak && !voice.speaking,
+                onClick = { onDismiss(); voice.speak() })
+        }
+        if (chat.running) DropdownMenuItem(
+            text = { Text(stringResource(R.string.chat_steer)) },
+            leadingIcon = { Icon(Icons.Default.TurnRight, null) },
+            enabled = draft.isNotBlank() && attachments.isEmpty(),
+            onClick = { onDismiss(); onSteer(draft); onDraftChange("") })
+        if (onModel != null) DropdownMenuItem(text = { Text(stringResource(R.string.botapp_model)) },
+            leadingIcon = { Icon(Icons.Default.Tune, null) },
+            enabled = !chat.running,
+            onClick = { onDismiss(); onModel() })
+        if (onContext != null) DropdownMenuItem(text = { Text(stringResource(R.string.botapp_context)) },
+            leadingIcon = { Icon(Icons.Default.DataUsage, null) },
+            onClick = { onDismiss(); onContext() })
     }
 }
 

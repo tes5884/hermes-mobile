@@ -53,6 +53,19 @@ object PushDelivery {
     fun setOnlyPhoneTurns(context: Context, only: Boolean) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(ONLY_PHONE_TURNS, only).apply()
 
+    private const val QUIET_BOTS = "quiet_bots"
+
+    /** Bot details → Notifications: [profile] on [connection] rings only when it needs the user ([PushQuiet]). Off by default. */
+    fun quietBot(context: Context, connection: String, profile: String): Boolean =
+        PushQuiet.key(connection, profile) in context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(QUIET_BOTS, emptySet()).orEmpty()
+
+    fun setQuietBot(context: Context, connection: String, profile: String, quiet: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val key = PushQuiet.key(connection, profile)
+        val next = prefs.getStringSet(QUIET_BOTS, emptySet()).orEmpty().toMutableSet().apply { if (quiet) add(key) else remove(key) }
+        prefs.edit().putStringSet(QUIET_BOTS, next).apply()
+    }
+
     /** A prompt sent from this phone started a turn in [sessionId]: its answer may notify. */
     fun claimTurn(context: Context, sessionId: String) = editTurns(context) { claims, _ ->
         if (sessionId.isNotBlank()) claims[sessionId] = claims[sessionId].orEmpty() + System.currentTimeMillis()
@@ -142,9 +155,9 @@ object PushDelivery {
      * content could not be fetched yet — it is generic. With it, the real title and text appear in the shade, and
      * on the lock screen too unless the user turned that off. Returns false when nothing was posted.
      */
-    fun show(context: Context, eventId: String, event: JSONObject? = null, merged: MergedFile? = null): Boolean {
+    fun show(context: Context, eventId: String, event: JSONObject? = null, merged: MergedFile? = null, owner: PushAccount? = null): Boolean {
         if (!permitted(context)) return false
-        // The user is looking at that very chat: the answer is already on screen.
+        // The user is looking at that very chat (or talking to it on a call): the answer is already on screen.
         val session = event?.optString("session_id").orEmpty()
         if (session.isNotBlank() && AppPresence.isShowing(session)) return false
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -164,14 +177,25 @@ object PushDelivery {
         val accent = 0xFF0053FD.toInt()
         val publicVersion = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_hermes).setColor(accent)
             .setContentTitle("Hermes").setContentText(generic).build()
+        // The small icon is the monochrome Hermes head: Android draws it as the badge on the bot's photo.
         val builder = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_hermes).setColor(accent)
             .setContentIntent(tap).setAutoCancel(true).setOnlyAlertOnce(true)
-        val profile = event?.optString("profile").orEmpty()
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+        val profile = event?.optString("profile").orEmpty().ifBlank { owner?.profile.orEmpty() }
+        val connection = event?.optString("connection").orEmpty().ifBlank { owner?.connection.orEmpty() }
+        // The bot that sent it, as a conversation: its photo is the notice's main image (Android 11+ via the shortcut).
+        val bot = if (profile.isNotBlank() && connection.isNotBlank()) PushPeople.bot(context, connection, profile) else null
+        val shortcut = bot?.let { PushPeople.publish(context, connection, profile, it) }
         if (profile.isNotBlank()) {
-            // One Android group per bot (not one "Hermes" stack), with the bot's avatar as the large icon.
-            builder.setGroup(PushGrouping.groupKey(profile)).setLargeIcon(PushGrouping.largeIcon(context, profile))
-                .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            // One Android group per bot (not one "Hermes" stack).
+            builder.setGroup(PushGrouping.groupKey(connection, profile)).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            // Below Android 11, or when the shortcut could not be published, the photo rides as the large icon.
+            if (PushConversation.needsLargeIcon(android.os.Build.VERSION.SDK_INT, shortcut)) {
+                builder.setLargeIcon(if (connection.isNotBlank()) PushPeople.icon(context, connection, profile, 128)
+                    else PushGrouping.roundAvatar(null, profile))
+            }
         }
+        if (shortcut != null) builder.setShortcutId(shortcut).setLocusId(androidx.core.content.LocusIdCompat(shortcut))
         if (merged != null) {
             // The file that followed this text: an action button that downloads and opens it.
             val fileIntent = Intent(context, MainActivity::class.java).setAction("hermes.notification")
@@ -179,20 +203,23 @@ object PushDelivery {
             builder.addAction(0, PushGrouping.fileLabel(merged.name),
                 PendingIntent.getActivity(context, 1, fileIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         }
-        if (event == null) {
-            builder.setContentTitle("Hermes").setContentText(generic).setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+        val (title, text) = if (event == null) "Hermes" to generic else presentation(context, event).let { (t, b) -> t to b.ifBlank { generic } }
+        val created = event?.let { (it.optDouble("created_at", 0.0) * 1000).toLong().takeIf { ms -> ms > 0 } } ?: System.currentTimeMillis()
+        builder.setContentTitle(bot?.name ?: title).setContentText(text)
+            .setWhen(created).setShowWhen(true)
+            // Android's own lock-screen setting decides: full content, or this generic public version.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
+        if (bot != null) {
+            // A one-message conversation from the bot; a routine's or channel's name or "Approval needed" heads it.
+            val heading = if (event == null) null else PushConversation.heading(title, bot.name.toString(), profile)
+            builder.setStyle(NotificationCompat.MessagingStyle(PushPeople.me(context))
+                .addMessage(NotificationCompat.MessagingStyle.Message(PushPeople.text(heading, text), created, bot)))
         } else {
-            val (title, text) = presentation(context, event)
-            builder.setContentTitle(title).setContentText(text.ifBlank { generic })
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text.ifBlank { generic }))
-                .setWhen((event.optDouble("created_at", 0.0) * 1000).toLong().takeIf { it > 0 } ?: System.currentTimeMillis())
-                .setShowWhen(true)
-                // Android's own lock-screen setting decides: full content, or this generic public version.
-                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setPublicVersion(publicVersion)
+            builder.setContentTitle(title).setStyle(NotificationCompat.BigTextStyle().bigText(text))
         }
         nm.notify(eventId, 0, builder.build())
-        if (profile.isNotBlank()) postSummary(context, nm, profile, accent)
+        if (profile.isNotBlank()) postSummary(context, nm, profile, connection, accent)
         return true
     }
 
@@ -200,9 +227,12 @@ object PushDelivery {
     class MergedFile(val eventId: String, val name: String)
 
     private const val LAST_TEXT = "last_text"
+    /** The text-merge slot of one bot on one server (two servers' "ezra" never merge into each other). */
+    private fun lastTextKey(event: JSONObject) =
+        LAST_TEXT + ":" + PushGrouping.conversationKey(event.optString("connection"), event.optString("profile"))
     private fun rememberText(context: Context, event: JSONObject) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(LAST_TEXT + ":" + event.optString("profile"), JSONObject().put("at", System.currentTimeMillis()).put("event", event).toString()).apply()
+            .putString(lastTextKey(event), JSONObject().put("at", System.currentTimeMillis()).put("event", event).toString()).apply()
     }
 
     /**
@@ -210,26 +240,32 @@ object PushDelivery {
      * an action button. Returns true when merged, so the file gets no row of its own.
      */
     private fun mergeIntoText(context: Context, nm: NotificationManager, event: JSONObject, files: List<String>): Boolean {
-        val profile = event.optString("profile")
-        val saved = runCatching { JSONObject(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(LAST_TEXT + ":" + profile, null) ?: return false) }.getOrNull() ?: return false
+        val saved = runCatching { JSONObject(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(lastTextKey(event), null) ?: return false) }.getOrNull() ?: return false
         val text = saved.optJSONObject("event") ?: return false
         val textId = text.optString("event_id")
-        if (!PushGrouping.shouldMerge(profile, saved.optLong("at"), profile, System.currentTimeMillis())) return false
+        val fileBot = PushGrouping.conversationKey(event.optString("connection"), event.optString("profile"))
+        val textBot = PushGrouping.conversationKey(text.optString("connection"), text.optString("profile"))
+        if (event.optString("profile").isBlank() || !PushGrouping.shouldMerge(textBot, saved.optLong("at"), fileBot, System.currentTimeMillis())) return false
         if (nm.activeNotifications.none { it.tag == textId }) return false
         return show(context, textId, text, MergedFile(event.optString("event_id"), PushMedia.name(files.first())))
     }
 
-    private fun postSummary(context: Context, nm: NotificationManager, profile: String, accent: Int) {
-        val key = PushGrouping.groupKey(profile)
-        val count = nm.activeNotifications.count { it.notification.group == key && it.tag != PushGrouping.summaryTag(profile) }
+    private fun postSummary(context: Context, nm: NotificationManager, profile: String, connection: String, accent: Int) {
+        val key = PushGrouping.groupKey(connection, profile)
+        val count = nm.activeNotifications.count { it.notification.group == key && it.tag != PushGrouping.summaryTag(connection, profile) }
         if (count < 1) return
+        // Opens that bot's chat (MainActivity routes ACTION_OPEN_BOT); before vc87 the action named no screen.
+        val open = Intent(context, MainActivity::class.java).setAction(PushConversation.ACTION_OPEN_BOT)
+            .putExtra(PushConversation.EXTRA_CONNECTION, connection).putExtra(PushConversation.EXTRA_PROFILE, profile)
+            .setData(android.net.Uri.parse("hermes-bot:${PushConversation.shortcutId(connection, profile)}"))
         val summary = NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_hermes).setColor(accent)
-            .setContentTitle(PushGrouping.botName(profile)).setContentText(PushGrouping.summaryText(profile, count))
+            .setContentTitle(PushConversation.botName(profile, PushAvatars.savedLabel(context, connection, profile)))
+            .setContentText(PushGrouping.summaryText(profile, count))
             .setGroup(key).setGroupSummary(true).setAutoCancel(true).setOnlyAlertOnce(true)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
-            .setContentIntent(PendingIntent.getActivity(context, 2, Intent(context, MainActivity::class.java).setAction("hermes.bot.$profile"), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .setContentIntent(PendingIntent.getActivity(context, 2, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
-        nm.notify(PushGrouping.summaryTag(profile), 0, summary)
+        nm.notify(PushGrouping.summaryTag(connection, profile), 0, summary)
     }
     /** Removes a notice from the shade and the inbox: the server withdrew it. */
     fun withdraw(context: Context, eventId: String) {
@@ -254,11 +290,17 @@ object PushDelivery {
             return false
         }
         // The profile is known from the account; the inbox event may not carry it (tap routing and the title use it).
-        event.put("profile", account.profile)
+        event.put("profile", account.profile).put("connection", account.connection)
         PushStore(context).received(account, event)
         // A turn started elsewhere (Desktop, the CLI…) stays in the inbox without ringing: whoever started it is there.
         if (event.optString("event_type") in setOf("turn_completed", "turn_failed") &&
             !turnNotifies(context, id, event.optString("session_id"))) {
+            context.getSystemService(NotificationManager::class.java).cancel(id, 0)
+            return true
+        }
+        // "Only when <bot> needs you" (Bot details): the rest of that bot's events stay in the inbox without ringing.
+        // After the turn rule, so a phone turn's claim is still used up by its own answer.
+        if (!PushQuiet.rings(event.optString("event_type"), quietBot(context, account.connection, account.profile))) {
             context.getSystemService(NotificationManager::class.java).cancel(id, 0)
             return true
         }
@@ -304,7 +346,8 @@ class HermesMessagingService : FirebaseMessagingService() {
         // that profile's inbox, even when private event details are still deferred.
         PushStore(this).received(account, JSONObject().put("event_id", id).put("title", "Hermes")
             .put("body", getString(R.string.push_generic)).put("state", "pending"), overwrite = false)
-        PushDelivery.show(this, id)
+        // The owner is known from the device id, so even the placeholder shows the bot's photo.
+        PushDelivery.show(this, id, owner = account)
         PushDelivery.schedule(this, id)
     }
 }

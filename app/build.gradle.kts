@@ -13,8 +13,8 @@ android {
         applicationId = providers.gradleProperty("hermes.applicationId").orElse("io.github.adrianlaborda.hermesmobile").get()
         minSdk = 26
         targetSdk = 36
-        versionCode = 76
-        versionName = "0.3.0-beta.15"
+        versionCode = 87
+        versionName = "0.4.0-beta.11"
 
         // Where the app looks for its own updates (GitHub releases); forks set theirs, or "" to turn it off.
         buildConfigField("String", "UPDATE_REPO", "\"${providers.gradleProperty("hermes.updateRepo").orElse("adrianlaborda/hermes-mobile").get()}\"")

@@ -11,6 +11,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.AddComment
@@ -115,7 +118,8 @@ internal fun ChatThread(
     slashPalette: SlashPalette,
     commandOutput: CommandOutput?,
     actions: ChatThreadActions,
-    twoPane: Boolean = false
+    twoPane: Boolean = false,
+    bot: BotChatHeader? = null
 ) {
     val conversationIdentity = ChatConversationIdentity.from(chat)
     var showModelDialog by remember(conversationIdentity) { mutableStateOf(false) }
@@ -138,6 +142,12 @@ internal fun ChatThread(
             liveTools.map { ChatMessage(role = "tool", content = it.detail, toolName = it.name, live = true, liveStatus = it.status) })
     }
     val displayRows = remember(timeline) { chatDisplayRows(timeline) }
+    // Answered approval cards (kept on this phone), by the key of the row each one follows.
+    val answeredAfter = remember(displayRows, bot?.approvals) {
+        val cards = bot?.approvals.orEmpty()
+        val at = com.nousresearch.hermesmobile.data.ApprovalCards.anchors(cards, displayRows.map { it.epochTime() })
+        cards.filter { (at[it.requestId] ?: -1) >= 0 }.groupBy { displayRows[at.getValue(it.requestId)].key }
+    }
     val entries = remember(displayRows, chat.hasOlderMessages) {
         reverseChatEntries(displayRows, chat.hasOlderMessages) { it.key }
     }
@@ -254,9 +264,13 @@ internal fun ChatThread(
         runCatching { context.startActivity(Intent.createChooser(send, null)) }
     }
 
+    // A voice note is being recorded in the bot composer: the bot header says "Listening…" (2b mock).
+    var listening by remember(conversationIdentity) { mutableStateOf(false) }
     voiceControls { voice ->
         Column(Modifier.fillMaxSize().imePadding()) {
-            ChatThreadTopBar(
+            // A bot's one chat: the bot is the header (tap = its details); no session switcher, no new chat.
+            if (bot != null) BotChatTopBar(bot, chat.running, listening = listening, showBack = !twoPane, onBack = actions.onBack)
+            else ChatThreadTopBar(
                 chat = chat,
                 artifactCount = artifactSuggestions.size,
                 showBack = !twoPane,
@@ -290,6 +304,10 @@ internal fun ChatThread(
                     }) { entry ->
                         when (entry) {
                             ChatListEntry.Bottom -> Column(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                                // A waiting approval is always at the newest point of the chat.
+                                if (bot != null) bot.approvals.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }.forEach { card ->
+                                    key(card.requestId) { InlineApprovalCard(card, bot.profile.label, { choice -> bot.onApproval(card.requestId, choice) }) }
+                                }
                                 LiveStatusLane(liveStatuses)
                                 ArtifactLane(artifactSuggestions, actions.onOpenArtifact)
                                 QueueLane(
@@ -302,7 +320,7 @@ internal fun ChatThread(
                                 val noteActions = LocalChatVoiceNoteActions.current
                                 if (noteActions != null) noteActions.pendingVoice.filter { it.roomId == "chat:${chat.storedSessionId}" }.forEach { note ->
                                     key(note.id) {
-                                        PendingVoiceBubble(note, { noteActions.onVoiceRetry(note.id) }, { noteActions.onVoiceAudioOnly(note.id) }, { noteActions.onVoiceDiscard(note.id) })
+                                        PendingVoiceBubble(note, { noteActions.onVoiceRetry(note.id) }, { noteActions.onVoiceAudioOnly(note.id) }, { noteActions.onVoiceDiscard(note.id) }, chatStyle = true)
                                     }
                                 }
                             }
@@ -310,18 +328,24 @@ internal fun ChatThread(
                                 if (loadingOlderMessages) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                                 else TextButton(onClick = actions.onLoadOlderMessages) { Text(stringResource(R.string.ui_bf2424a0ba)) }
                             }
-                            is ChatListEntry.Row -> ChatTranscriptRow(
-                                row = entry.row,
-                                turnEnd = entry.row.key in turnEnds.keys,
-                                canRetry = entry.row.key == turnEnds.retryKey && !chat.running,
-                                readOnly = chat.readOnly,
-                                voice = voice,
-                                onEdit = actions.onEditMessage,
-                                onCopy = copy,
-                                onShare = share,
-                                onRetry = actions.onRetry,
-                                onBranch = actions.onBranch
-                            )
+                            is ChatListEntry.Row -> Column {
+                                ChatTranscriptRow(
+                                    row = entry.row,
+                                    turnEnd = entry.row.key in turnEnds.keys,
+                                    canRetry = entry.row.key == turnEnds.retryKey && !chat.running,
+                                    readOnly = chat.readOnly,
+                                    voice = voice,
+                                    onEdit = actions.onEditMessage,
+                                    onCopy = copy,
+                                    onShare = share,
+                                    onRetry = actions.onRetry,
+                                    onBranch = actions.onBranch
+                                )
+                                // Answered approvals sit under the last message before they were asked.
+                                if (bot != null) answeredAfter[entry.row.key]?.forEach { card ->
+                                    key(card.requestId) { InlineApprovalCard(card, bot.profile.label, { choice -> bot.onApproval(card.requestId, choice) }) }
+                                }
+                            }
                         }
                     }
                 }
@@ -381,7 +405,9 @@ internal fun ChatThread(
                 onContext = actions.onContext,
                 onSend = send,
                 onStop = actions.onStop,
-                onSteer = actions.onSteer
+                onSteer = actions.onSteer,
+                botName = bot?.profile?.label,
+                onRecordingChange = { listening = it }
             )
             }
         }
@@ -583,6 +609,74 @@ private fun ChatThreadTopBar(
                 }
             }
             IconButton(onClick = onNewChat, enabled = newChatEnabled) { Icon(Icons.Outlined.AddComment, stringResource(R.string.ui_db18382a24)) }
+        }
+        HorizontalDivider(color = MaterialTheme.hermes.line)
+    }
+}
+
+/**
+ * Header of a bot's one continuous chat (Nova's mock): back, avatar with a live dot, name + role, the live status,
+ * and a chevron. The whole middle is one target that opens the bot's details.
+ */
+@Composable
+private fun BotChatTopBar(bot: BotChatHeader, running: Boolean, listening: Boolean = false, showBack: Boolean, onBack: () -> Unit) {
+    val needsOk = bot.dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT ||
+        bot.approvals.any { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }
+    val working = running || bot.dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING
+    val orange = com.nousresearch.hermesmobile.ui.theme.HermesTokens.Orange
+    Column {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 4.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.a21_back)) }
+            else Spacer(Modifier.width(10.dp))
+            Row(
+                Modifier.weight(1f).clip(MaterialTheme.shapes.medium)
+                    .clickable(onClickLabel = stringResource(R.string.botapp_details), onClick = bot.onDetails)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box {
+                    com.nousresearch.hermesmobile.ui.components.ProfileAvatar(bot.profile, size = 48, avatarDataUrl = bot.avatar, modifier = Modifier.clip(CircleShape))
+                    val dotColor = when {
+                        needsOk -> orange
+                        working -> MaterialTheme.colorScheme.primary
+                        else -> null
+                    }
+                    if (dotColor != null) Box(
+                        Modifier.align(Alignment.BottomEnd).size(13.dp).border(2.dp, MaterialTheme.colorScheme.background, CircleShape)
+                            .padding(2.dp).background(dotColor, CircleShape)
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    val role = com.nousresearch.hermesmobile.data.BotHome.role(bot.profile)
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(bot.profile.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        if (role.isNotBlank() && (needsOk || working || listening)) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(role, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    when (com.nousresearch.hermesmobile.data.VoiceBubbles.header(listening, needsOk, working)) {
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.LISTENING -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                            Spacer(Modifier.width(7.dp))
+                            Text(stringResource(R.string.botapp_listening), style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                        }
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.NEEDS_OK -> Text(stringResource(R.string.botapp_needs_ok), style = MaterialTheme.typography.bodyMedium, color = orange, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.WORKING -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            ThinkingIndicator(dotSize = 4.dp, spacing = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.a21_working), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, maxLines = 1)
+                        }
+                        com.nousresearch.hermesmobile.data.VoiceBubbles.Header.ROLE -> if (role.isNotBlank()) Text(role, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         HorizontalDivider(color = MaterialTheme.hermes.line)
     }

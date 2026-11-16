@@ -1,0 +1,13 @@
+<resources>
+    <plurals name="channel_members_more">
+        <item quantity="one">%1$s and %2$d more</item>
+        <item quantity="other">%1$s and %2$d more</item>
+    </plurals>
+    <string name="channel_members">Channel members</string>
+    <string name="channel_mention">Mention @%1$s</string>
+    <string name="channel_typing">%1$s is typing</string>
+    <string name="channel_working_tool">%1$s is working · %2$s</string>
+    <string name="channel_message_hint">Message the channel</string>
+    <string name="channel_reply_to">Reply to @%1$s</string>
+    <string name="channel_reply_thread">Reply in its thread</string>
+</resources>

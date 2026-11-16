@@ -9,6 +9,21 @@ server plugin it needs for notifications.
 
 ## [Unreleased]
 
+### Added
+
+- Inline approval cards in a bot's chat: a plain-words card with the command behind Details and Approve once /
+  Deny (plus Always allow only where Hermes offers it; no "for this session"). Answered cards collapse to
+  "Approved once · time" or "You said no" and stay in place after a reload (kept on the phone). Other chats keep
+  the approval dialog.
+
+### Changed
+
+- Bot-first start page: the app opens on the bots (pinned bot on top, departments in a fixed order, channels
+  below) with a one-line status per bot (needs your OK / working on / unread / idle), a "N need you · N working ·
+  N idle" summary and a floating hold-to-talk button for the pinned bot. A bot opens its one continuous chat,
+  whose header is the bot (avatar, role, live status) instead of a session switcher; Home and Chats stay in the
+  side menu.
+
 ## [0.3.0-beta.15] - 2026-10-31
 
 ### Added

@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.nousresearch.hermesmobile.R
 import com.nousresearch.hermesmobile.data.PendingVoiceNote
 import com.nousresearch.hermesmobile.data.VoiceNotes
+import com.nousresearch.hermesmobile.ui.theme.hermes
 import kotlin.math.roundToInt
 
 /** What the hold-to-record gesture reports to the composer. */
@@ -56,47 +58,11 @@ fun HoldMicButton(
     showLockHint: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val latest by rememberUpdatedState(callbacks)
-    val lockPx = with(LocalDensity.current) { 64.dp.toPx() }
     val label = stringResource(R.string.group_voice_note)
     Box(
         modifier.size(44.dp)
             .graphicsLayer { val k = if (recording) 1.3f else 1f; scaleX = k; scaleY = k }
-            .semantics { onClick(label) { if (enabled) latest.onTalkBackToggle(); true } }
-            .pointerInput(enabled, cancelWidthPx) {
-                if (!enabled) return@pointerInput
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val started = latest.onPress()
-                    if (!started) {
-                        // Permission prompt is up: swallow this press; he holds again after allowing.
-                        do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                        return@awaitEachGesture
-                    }
-                    var locked = false
-                    var cancelled = false
-                    var upAt = down.uptimeMillis
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Main)
-                        val ch = event.changes.firstOrNull { it.id == down.id } ?: break
-                        upAt = ch.uptimeMillis
-                        ch.consume()
-                        if (!ch.pressed) break
-                        val dx = ch.position.x - down.position.x
-                        val dy = ch.position.y - down.position.y
-                        latest.onDrag(dx, dy)
-                        if (VoiceNotes.isCancelDrag(dx, cancelWidthPx)) { cancelled = true; break }
-                        if (VoiceNotes.isLockDrag(dy, lockPx)) { locked = true; latest.onLock(); break }
-                    }
-                    if (locked) {
-                        // Finger can let go now; wait for it so the lift isn't read as a release.
-                        do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                    } else {
-                        latest.onRelease(upAt - down.uptimeMillis, cancelled)
-                        if (cancelled) do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
-                    }
-                }
-            },
+            .holdToRecord(enabled, cancelWidthPx, callbacks, label),
         contentAlignment = Alignment.Center
     ) {
         Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary, modifier = Modifier.fillMaxSize()) {
@@ -122,6 +88,50 @@ fun HoldMicButton(
             }
         }
     }
+}
+
+/**
+ * The hold-to-record gesture on any surface (the composer's mic, the home's "Talk to …" pill): press starts,
+ * release sends, slide left past [cancelWidthPx]/3 cancels, slide up locks. TalkBack's activate toggles instead.
+ */
+fun Modifier.holdToRecord(enabled: Boolean, cancelWidthPx: Float, callbacks: HoldMicCallbacks, label: String): Modifier = composed {
+    val latest by rememberUpdatedState(callbacks)
+    val lockPx = with(LocalDensity.current) { 64.dp.toPx() }
+    semantics { onClick(label) { if (enabled) latest.onTalkBackToggle(); true } }
+        .pointerInput(enabled, cancelWidthPx) {
+            if (!enabled) return@pointerInput
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val started = latest.onPress()
+                if (!started) {
+                    // Permission prompt is up: swallow this press; he holds again after allowing.
+                    do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                    return@awaitEachGesture
+                }
+                var locked = false
+                var cancelled = false
+                var upAt = down.uptimeMillis
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Main)
+                    val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                    upAt = ch.uptimeMillis
+                    ch.consume()
+                    if (!ch.pressed) break
+                    val dx = ch.position.x - down.position.x
+                    val dy = ch.position.y - down.position.y
+                    latest.onDrag(dx, dy)
+                    if (VoiceNotes.isCancelDrag(dx, cancelWidthPx)) { cancelled = true; break }
+                    if (VoiceNotes.isLockDrag(dy, lockPx)) { locked = true; latest.onLock(); break }
+                }
+                if (locked) {
+                    // Finger can let go now; wait for it so the lift isn't read as a release.
+                    do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                } else {
+                    latest.onRelease(upAt - down.uptimeMillis, cancelled)
+                    if (cancelled) do { val e = awaitPointerEvent(); e.changes.forEach { it.consume() } } while (e.changes.any { it.pressed })
+                }
+            }
+        }
 }
 
 /** The composer while recording: red dot + timer, live waveform, then the slide-to-cancel hint (or Cancel/Send once locked). */
@@ -180,7 +190,8 @@ fun RecordingBar(
 
 /** Tzvi's own voice note before it is in the room: play button + length, then a spinner while it transcribes, or Retry. */
 @Composable
-fun PendingVoiceBubble(note: PendingVoiceNote, onRetry: () -> Unit, onAudioOnly: () -> Unit, onDiscard: () -> Unit) {
+fun PendingVoiceBubble(note: PendingVoiceNote, onRetry: () -> Unit, onAudioOnly: () -> Unit, onDiscard: () -> Unit, chatStyle: Boolean = false) {
+    if (chatStyle) { PendingChatVoiceBubble(note, onRetry, onAudioOnly, onDiscard); return }
     val maxBubble = (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp * 0.8f).dp
     val shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomEnd = 4.dp, bottomStart = 18.dp)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -230,5 +241,66 @@ private fun LocalNotePlayer(path: String, totalSec: Int) {
         }) { Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, stringResource(R.string.group_voice_play)) }
         Spacer(Modifier.width(8.dp))
         Text(VoiceNotes.clock(totalSec), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * A 1:1 chat's note before it is sent, drawn like the sent one (Nova's 2-chat-voice mock): play button, bars and
+ * length over a hairline, then "Transcribing…" (or the failure with Retry / Send audio only / Discard).
+ */
+@Composable
+private fun PendingChatVoiceBubble(note: PendingVoiceNote, onRetry: () -> Unit, onAudioOnly: () -> Unit, onDiscard: () -> Unit) {
+    var player by remember(note.filePath) { mutableStateOf<android.media.MediaPlayer?>(null) }
+    var playing by remember(note.filePath) { mutableStateOf(false) }
+    var positionMs by remember(note.filePath) { mutableIntStateOf(0) }
+    DisposableEffect(note.filePath) { onDispose { player?.release(); player = null } }
+    LaunchedEffect(playing) { while (playing) { positionMs = player?.currentPosition ?: 0; kotlinx.coroutines.delay(100) } }
+    val toggle: () -> Unit = toggle@{
+        val p = player
+        if (p != null) { if (playing) { p.pause(); playing = false } else { p.start(); playing = true }; return@toggle }
+        runCatching {
+            val mp = android.media.MediaPlayer()
+            mp.setDataSource(note.filePath)
+            mp.setOnCompletionListener { playing = false; positionMs = 0; it.seekTo(0) }
+            mp.prepare(); player = mp; mp.start(); playing = true
+        }
+    }
+    val shape = RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp), horizontalArrangement = Arrangement.End) {
+        Surface(
+            color = MaterialTheme.hermes.userBubble,
+            shape = shape,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.hermes.userBubbleBorder),
+            modifier = Modifier.widthIn(max = 320.dp)
+        ) {
+            Column(Modifier.widthIn(min = 220.dp).padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val totalMs = note.durationMs.toInt().coerceAtLeast(1)
+                com.nousresearch.hermesmobile.ui.components.VoiceNoteStrip(
+                    seed = note.filePath,
+                    seconds = ((note.durationMs + 500) / 1000).toInt(),
+                    playing = playing, busy = false, enabled = true,
+                    progress = com.nousresearch.hermesmobile.data.VoiceBubbles.progress(positionMs, totalMs),
+                    positionSec = if (playing || positionMs > 0) positionMs / 1000 else null,
+                    onToggle = toggle
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .22f))
+                Text(
+                    stringResource(R.string.botapp_transcript), style = MaterialTheme.typography.labelSmall.copy(letterSpacing = androidx.compose.ui.unit.TextUnit(1.2f, androidx.compose.ui.unit.TextUnitType.Sp)),
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!note.failed) Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.group_voice_transcribing), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text(stringResource(R.string.group_voice_failed), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onRetry) { Text(stringResource(R.string.group_voice_retry)) }
+                        TextButton(onClick = onAudioOnly) { Text(stringResource(R.string.group_voice_audio_only)) }
+                        IconButton(onClick = onDiscard, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.DeleteOutline, stringResource(R.string.group_voice_cancel), Modifier.size(18.dp)) }
+                    }
+                }
+            }
+        }
     }
 }

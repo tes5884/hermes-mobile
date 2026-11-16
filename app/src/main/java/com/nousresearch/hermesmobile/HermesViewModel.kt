@@ -80,8 +80,8 @@ data class HermesUiState(
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: String? = null,
-    // Like Desktop, the app opens on the conversation list; Home stays reachable from the drawer.
-    val section: MainSection = MainSection.HOME,
+    // Bot-first (2026-11-15): the app opens on the bots; Home (dashboard) and Chats stay reachable from the drawer.
+    val section: MainSection = MainSection.BOTS,
     val profiles: List<HermesProfile> = emptyList(),
     val botRoster: List<RoutedBot> = emptyList(),
     val botRosterLoading: Boolean = false,
@@ -96,6 +96,15 @@ data class HermesUiState(
     val groupsLoading: Boolean = false,
     val groupError: String? = null,
     val activeGroup: ActiveGroupRoom? = null,
+    /** "All channels" from the bots page: the rooms list takes the page over until back. */
+    val channelsListOpen: Boolean = false,
+    /** The full-screen Search palette covers the app. View-model state, not Compose state, so opening it reconciles. */
+    val searchOpen: Boolean = false,
+    /**
+     * Bot details (P4), open over that bot's chat. View-model state like [searchOpen], so opening and closing it run the
+     * chat-change reconcile; it lives only while the Chat page shows that bot's chat ([settleOverlays]).
+     */
+    val botDetails: com.nousresearch.hermesmobile.data.BotDetailsState? = null,
     val groupActionBusy: Boolean = false,
     val pendingVoice: List<PendingVoiceNote> = emptyList(),
     val sessions: List<HermesSession> = emptyList(),
@@ -132,6 +141,8 @@ data class HermesUiState(
     val modelOptionsLoading: Boolean = false,
     val interaction: ServerInteraction? = null,
     val interactionQueue: List<ServerInteraction> = emptyList(),
+    /** Approval cards inline in the open bot chat: pending ones (answered here) and the ones answered on this phone. */
+    val approvalCards: List<com.nousresearch.hermesmobile.data.ApprovalCards.Card> = emptyList(),
     val telegramOnboarding: TelegramOnboarding? = null,
     val botEditor: BotProfileConfig? = null,
     val botEditorLoadingProfile: String? = null,
@@ -170,6 +181,48 @@ data class HermesUiState(
 
 /** Display-only result of a slash command, shown in a sheet over the chat. */
 data class CommandOutput(val command: String, val output: String)
+
+/**
+ * What [state] shows, for [com.nousresearch.hermesmobile.data.ChatChange]: page, open chat (a writable bot chat or
+ * not), open room, channels list, Search palette, connection. [epoch] counts ended connections. Search covers the Chat
+ * page, so while it is open no chat is on screen.
+ */
+internal fun chatViewOf(state: HermesUiState, epoch: Long): com.nousresearch.hermesmobile.data.ChatView {
+    val chat = state.activeChat
+    return com.nousresearch.hermesmobile.data.ChatView(
+        epoch = epoch,
+        connection = state.activeConnectionId,
+        section = state.section.name,
+        chatPage = state.section == MainSection.CHAT && !state.searchOpen && state.botDetails == null,
+        storedSessionId = chat?.storedSessionId,
+        runtimeSessionId = chat?.runtimeSessionId,
+        profile = chat?.profile,
+        botChat = chat != null && com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, state.profiles) != null,
+        readOnly = chat?.readOnly == true,
+        room = state.activeGroup?.room?.roomId,
+        channelsList = state.channelsListOpen,
+        search = state.searchOpen,
+        details = state.botDetails?.profile
+    )
+}
+
+/**
+ * The pages that only make sense over another one, closed once that one is gone (run by the reconcile before it reads
+ * the view): the channels list belongs to the bots page, and Bot details to its bot's chat on the Chat page.
+ */
+internal fun settleOverlays(state: HermesUiState): HermesUiState {
+    var next = state
+    if (next.channelsListOpen && next.section != MainSection.BOTS) next = next.copy(channelsListOpen = false)
+    val details = next.botDetails
+    if (details != null) {
+        val chat = next.activeChat
+        val botChat = chat != null && com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, next.profiles) != null
+        if (!com.nousresearch.hermesmobile.data.BotDetails.stillOpen(details.profile, next.section == MainSection.CHAT, chat?.profile, botChat)) {
+            next = next.copy(botDetails = null)
+        }
+    }
+    return next
+}
 
 class HermesViewModel(application: Application) : AndroidViewModel(application), HermesGatewayListener {
     private val store = GatewayConfigStore(application)
@@ -210,6 +263,20 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private val avatarMissing = mutableSetOf<String>()
     private val avatarLoading = mutableSetOf<String>()
     private val avatarCacheOrder = ArrayDeque<String>()
+    private var avatarCacheClearedAt = 0L
+    /** A voice note recorded on the bots page ("Talk to …"): sent only by the chat open it started. */
+    private val pendingTalk = com.nousresearch.hermesmobile.data.PendingTalkSlot<Pair<java.io.File, Long>, com.nousresearch.hermesmobile.data.ChatView> { it.first.delete() }
+    /** Which approvals are cards in the bot chat on screen, which wait for an opening chat, and which keep the dialog. */
+    private val approvalRouter = com.nousresearch.hermesmobile.data.InlineApprovalRouter<ServerInteraction>(
+        idOf = { it.requestId }, methodOf = { it.method }, sessionOf = { it.params.optString("session_id") }
+    )
+    /** The one per-chat reconcile; see [reconcileChatChange]. Declared before [uiState] because its setter uses it. */
+    private val chatChange = com.nousresearch.hermesmobile.data.ChatChange(approvalRouter, pendingTalk)
+    /** Counts ended connections (disconnect, switch, sign-out): their approvals and recordings are dead. */
+    private var connectionEpoch = 0L
+    /** Off while the view model is being constructed (the members the reconcile uses are not all set yet). */
+    private var chatChangeArmed = false
+    private var reconcilingChatChange = false
 
     private val streamBuffer = StringBuilder()
     private var streamFlushJob: Job? = null
@@ -224,7 +291,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private val initialStoreLoad = store.loadSnapshotResult()
     private val initialStoreSnapshot = (initialStoreLoad as? GatewayStoreLoadResult.Loaded)?.snapshot ?: GatewayStoreSnapshot()
 
-    var uiState by mutableStateOf(
+    private var uiStateValue by mutableStateOf(
         HermesUiState(
             savedConfig = initialStoreSnapshot.active,
             connections = initialStoreSnapshot.connections,
@@ -234,7 +301,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             error = (initialStoreLoad as? GatewayStoreLoadResult.Invalid)?.message
         )
     )
-        private set
+
+    /**
+     * The screen's state. Every write goes through this setter, so every change of the open chat, page, room, channels
+     * list or connection — whichever path made it — runs [reconcileChatChange]. No navigation path reconciles on its own.
+     */
+    var uiState: HermesUiState
+        get() = uiStateValue
+        private set(value) {
+            uiStateValue = value
+            if (chatChangeArmed && !reconcilingChatChange && chatChange.differs(chatViewOf(value, connectionEpoch))) reconcileChatChange()
+        }
 
     init {
         // The Groups list shows saved rows at once; the network refresh only replaces them.
@@ -554,7 +631,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun disconnect(clearSaved: Boolean = false) {
         persistCurrentComposerNow()
         connectionGeneration += 1
-        navigationGeneration += 1
+        // The connection ends: its approvals and any waiting "Talk to …" note are dead (reconciled in navigate()).
+        connectionEpoch += 1
+        navigate()
         // Every network action is a ViewModel child. Cancelling existing children here gives
         // gateway switches a hard isolation boundary in addition to generation/repository guards.
         viewModelScope.coroutineContext.cancelChildren()
@@ -703,11 +782,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun closeActiveChat() {
-        val back = chatReturnSection
+        // A bot's one chat always closes back to the bots, even when a push or a restored page opened it.
+        val back = chatReturnSection ?: uiState.activeChat
+            ?.takeIf { com.nousresearch.hermesmobile.ui.screens.botChatProfile(it, uiState.profiles) != null }?.let { START_SECTION }
         handOffQueue()
         persistCurrentComposerNow()
         uiState.activeChat?.runtimeSessionId?.let(sessionModelPins::remove)
-        navigationGeneration += 1
+        navigate()
         resetStream()
         composerSaveJob?.cancel()
         uiState = uiState.copy(
@@ -734,17 +815,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     /** The pages visited before this one, so system back returns to the previous page rather than to Home. */
     private val sectionHistory = ArrayDeque<MainSection>()
-    val canNavigateBack: Boolean get() = sectionHistory.isNotEmpty() || uiState.section != MainSection.HOME
+    val canNavigateBack: Boolean get() = sectionHistory.isNotEmpty() || uiState.section != START_SECTION
 
-    /** System back: the previous page, or Home (the start destination) once there is none. */
+    /** System back: the previous page, or the bots (the start destination) once there is none. */
     fun navigateBack() {
-        val previous = sectionHistory.removeLastOrNull() ?: MainSection.HOME.takeIf { uiState.section != MainSection.HOME } ?: return
+        val previous = sectionHistory.removeLastOrNull() ?: START_SECTION.takeIf { uiState.section != START_SECTION } ?: return
         switchSection(previous, record = false)
     }
 
     fun switchSection(section: MainSection, record: Boolean = true) {
         // Kanban is a destination only while the gateway has it for the selected profile.
-        if (section == MainSection.KANBAN && !uiState.kanbanAvailable) return switchSection(MainSection.HOME, record)
+        if (section == MainSection.KANBAN && !uiState.kanbanAvailable) return switchSection(START_SECTION, record)
         if (record && section != uiState.section) {
             sectionHistory.remove(section)
             sectionHistory.addLast(uiState.section)
@@ -761,8 +842,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         when (section) {
             MainSection.BOTS -> {
                 // No asset revision is exposed by profiles.get_asset. Re-entering
-                // Bot Mode is therefore our explicit cross-device cache fence.
-                clearAvatarCache()
+                // Bot Mode is therefore our explicit cross-device cache fence — at most every few minutes, since the
+                // bots page is now the start page and every chat returns to it (clearing each time flashed initials).
+                val now = System.currentTimeMillis()
+                if (now - avatarCacheClearedAt > AVATAR_FENCE_MS) { clearAvatarCache(); avatarCacheClearedAt = now }
                 // The roster is built from the profiles: rebuild it once they (and their latest messages) are in.
                 refreshProfiles(then = ::refreshBotRoster)
                 if (uiState.activeGroup != null) {
@@ -838,7 +921,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 kanbanTaskId = null,
                 kanbanTask = null
             )
-            if (!available && uiState.section == MainSection.KANBAN) switchSection(MainSection.HOME, record = false)
+            if (!available && uiState.section == MainSection.KANBAN) switchSection(START_SECTION, record = false)
             // A board on screen is loaded for the profile that is now selected.
             if (available && uiState.section == MainSection.KANBAN) refreshKanban()
         }
@@ -1857,6 +1940,11 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     refreshing = false,
                     error = null
                 )
+                // The bots page is the start page: its roster and channels are built here on connect, not only on entry.
+                if (uiState.section == MainSection.BOTS && uiState.activeChat == null) {
+                    refreshBotRoster()
+                    if (uiState.activeGroup == null) refreshGroups()
+                }
             }.onFailure {
                 if (generation == refreshGeneration) {
                     uiState = uiState.copy(loading = false, refreshing = false, error = it.message)
@@ -1889,6 +1977,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         dropAvatarCache(it.name, markMissing = true)
                     }
                     uiState = uiState.copy(profiles = profiles, selectedProfile = selected)
+                    uiState.activeConnectionId?.let { prefetchPushAvatars(repo, it, profiles) }
                     then()
                 }
         }
@@ -1916,18 +2005,55 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun dropAvatarCache(name: String, markMissing: Boolean = false) {
         avatarAssets.remove(name)
         avatarCacheOrder.remove(name)
-        if (markMissing) { avatarMissing.add(name); com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(getApplication(), name, null) } else avatarMissing.remove(name)
+        if (markMissing) { avatarMissing.add(name); savePushAvatar(name, null) } else avatarMissing.remove(name)
     }
 
     private fun cacheAvatar(name: String, data: String) {
         avatarMissing.remove(name)
         avatarAssets[name] = data
-        getApplication<android.app.Application>().let { com.nousresearch.hermesmobile.push.PushGrouping.saveAvatar(it, name, data) }
+        savePushAvatar(name, data)
         avatarCacheOrder.remove(name)
         avatarCacheOrder.addLast(name)
         while (avatarCacheOrder.size > MAX_AVATAR_CACHE_ITEMS) {
             val evicted = avatarCacheOrder.removeFirst()
             avatarAssets.remove(evicted)
+        }
+    }
+
+    /** The photo a push draws, saved for the server on screen with the bot's `hermes-bots` revision and name. */
+    private fun savePushAvatar(name: String, data: String?) {
+        val connection = uiState.activeConnectionId ?: return
+        val bot = uiState.profiles.firstOrNull { it.name == name }
+        com.nousresearch.hermesmobile.push.PushAvatars.save(getApplication(), connection, name, data,
+            bot?.uiMetaRevisions?.get(com.nousresearch.hermesmobile.data.HermesRepository.BOT_META_KEY), bot?.label)
+    }
+
+    private var pushAvatarJob: Job? = null
+
+    /**
+     * After a roster load: every bot whose saved push photo is missing or was saved under another `hermes-bots`
+     * revision is fetched now, one at a time, so a push later renders the photo without a network call. Names are
+     * kept current too. Bound to the repository it started on; a connection change cancels it.
+     */
+    private fun prefetchPushAvatars(repo: HermesRepository, connection: String, profiles: List<HermesProfile>) {
+        val app = getApplication<android.app.Application>()
+        pushAvatarJob?.cancel()
+        pushAvatarJob = viewModelScope.launch {
+            for (bot in profiles) {
+                if (repository !== repo) return@launch
+                val revision = bot.uiMetaRevisions[com.nousresearch.hermesmobile.data.HermesRepository.BOT_META_KEY]
+                val saved = com.nousresearch.hermesmobile.push.PushAvatars.savedRevision(app, connection, bot.name)
+                val hasFile = com.nousresearch.hermesmobile.push.PushAvatars.hasPhoto(app, connection, bot.name)
+                if (!com.nousresearch.hermesmobile.push.PushAvatars.stale(saved, revision, hasFile, bot.hasAvatar)) {
+                    com.nousresearch.hermesmobile.push.PushAvatars.saveLabel(app, connection, bot.name, bot.label)
+                    continue
+                }
+                val data = if (bot.hasAvatar) runCatching { repo.getBotAvatar(bot.name) }.getOrElse { continue } else null
+                if (repository !== repo) return@launch
+                withContext(Dispatchers.IO) {
+                    com.nousresearch.hermesmobile.push.PushAvatars.save(app, connection, bot.name, data, revision, bot.label)
+                }
+            }
         }
     }
 
@@ -2170,6 +2296,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
      * behind them. Nothing here waits on the network, and a missing connection is a status line, not a dead tap.
      */
     fun openGroup(room: GroupRoom) {
+        // A navigation: an open still in flight (e.g. "Talk to …") never lands over the channel, and its note is dropped.
+        navigate()
         val generation = ++groupGeneration
         groupPollingJob?.cancel()
         val cached = roomCache()?.loadRoom(room.roomId)
@@ -2181,7 +2309,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         uiState = uiState.copy(
             activeGroup = ActiveGroupRoom(
                 room = room, events = events, cursor = cursor, latestSeq = maxOf(room.latestSeq, cachedMax ?: 0L),
-                link = if (repository == null || !networkOnline) RoomLink.OFFLINE else RoomLink.CONNECTING
+                link = if (repository == null || !networkOnline) RoomLink.OFFLINE else RoomLink.CONNECTING,
+                approvalCards = approvalStore.load(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, room.roomId)
             ),
             groupsLoading = false, groupError = null, groupActionBusy = false
         )
@@ -2194,6 +2323,22 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         groupPollingJob = null
         uiState = uiState.copy(activeGroup = null, groupActionBusy = false)
         refreshGroups()
+    }
+
+    /** "All channels" on the bots page (open = true) and back from it. Opening it is a navigation, like a channel. */
+    fun showChannels(open: Boolean) {
+        if (open) navigate()
+        uiState = uiState.copy(channelsListOpen = open)
+        if (open) refreshGroups()
+    }
+
+    /**
+     * The full-screen Search palette opens (drawer, Home pill) or closes (dismiss, or just before running a result).
+     * Not a navigation: the screen behind it stays. But what is visible changes, so the uiState setter reconciles: a
+     * waiting Talk note is discarded, approval cards go to the dialog and come back as cards when Search closes.
+     */
+    fun showSearch(open: Boolean) {
+        uiState = uiState.copy(searchOpen = open)
     }
 
     private fun startGroupPolling(roomId: String, generation: Long, immediate: Boolean = false) {
@@ -2216,10 +2361,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         if (generation == groupGeneration && latest?.room?.roomId == roomId) {
                             // Never let a slow poll move the monotonic cursor backwards.
                             val merged = com.nousresearch.hermesmobile.data.RoomCache.merge(latest.events, updated.events, Int.MAX_VALUE).takeLast(1200)
+                            noteRoomApprovals(roomId, updated.driver.pendingActions)
                             uiState = uiState.copy(activeGroup = updated.copy(
                                 // Composer state belongs to the latest snapshot, not the one this poll started from.
                                 composerAttachments = latest.composerAttachments,
                                 replyThreadId = latest.replyThreadId,
+                                approvalCards = latest.approvalCards,
                                 cursor = maxOf(latest.cursor, updated.cursor),
                                 latestSeq = maxOf(latest.latestSeq, updated.latestSeq),
                                 events = merged,
@@ -2520,13 +2667,41 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
+    /** When this phone first saw each waiting channel approval: an answered card is placed in the transcript by it. */
+    private val roomApprovalSeen = LinkedHashMap<String, Long>()
+
+    private fun noteRoomApprovals(roomId: String, actions: List<GroupPendingAction>) {
+        val now = System.currentTimeMillis()
+        actions.filter { it.kind == "approval" }.forEach { roomApprovalSeen.getOrPut("$roomId|" + com.nousresearch.hermesmobile.data.ChannelView.approvalKey(it)) { now } }
+        while (roomApprovalSeen.size > 200) roomApprovalSeen.remove(roomApprovalSeen.keys.first())
+    }
+
     fun approveGroupAction(action: GroupPendingAction, choice: String) {
         val repo = repository ?: return
         val active = uiState.activeGroup ?: return
+        val roomId = active.room.roomId
         viewModelScope.launch {
             uiState = uiState.copy(groupActionBusy = true)
-            runCatching { repo.approveGroupTask(active.room.roomId, action, choice) }
-                .onSuccess { uiState = uiState.copy(groupActionBusy = false, snackbar = string(if (choice == "once") R.string.i18n_vm_approved_once else R.string.i18n_vm_denied)) }
+            runCatching { repo.approveGroupTask(roomId, action, choice) }
+                .onSuccess {
+                    // Recorded only once the server took the answer, so the collapsed card never claims an answer that failed.
+                    val now = System.currentTimeMillis()
+                    val key = com.nousresearch.hermesmobile.data.ChannelView.approvalKey(action)
+                    val card = com.nousresearch.hermesmobile.data.ChannelView.card(action, roomApprovalSeen["$roomId|$key"] ?: now)
+                        // Without Hermes' request id, each answer is its own record: never merged with an earlier one.
+                        .let { if (action.requestId.isBlank()) it.copy(requestId = "$key@$now") else it }
+                    val current = uiState.activeGroup?.takeIf { it.room.roomId == roomId }
+                    val base = current?.approvalCards ?: approvalStore.load(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, roomId)
+                    val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(
+                        com.nousresearch.hermesmobile.data.ApprovalCards.upsert(base, card), card.requestId, choice, now
+                    )
+                    approvalStore.save(com.nousresearch.hermesmobile.data.ChannelView.STORE_PROFILE, roomId, cards)
+                    uiState = uiState.copy(
+                        groupActionBusy = false,
+                        activeGroup = current?.copy(approvalCards = cards) ?: uiState.activeGroup,
+                        snackbar = string(if (choice == "once") R.string.i18n_vm_approved_once else R.string.i18n_vm_denied)
+                    )
+                }
                 .onFailure { uiState = uiState.copy(groupActionBusy = false, error = it.message) }
         }
     }
@@ -2726,7 +2901,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         rememberChatOrigin()
         handOffQueue()
         persistCurrentComposerNow()
-        val generation = ++navigationGeneration
+        val generation = navigate()
         resetStream()
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null)
@@ -2850,8 +3025,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         val repo = repository ?: return
         if (uiState.activeChat?.storedSessionId != session.id) handOffQueue()
         rememberChatOrigin()
-        val generation = ++navigationGeneration
+        val generation = navigate()
         resetStream()
+        beginChatOpen()
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null)
             runCatching { openStoredChat(repo, session) }
@@ -2879,9 +3055,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }
                     updateSessionLocal(session.copy(unread = false))
                     markChatSeen(chat.storedSessionId)
+                    reconcileChatChange() // the open is over (it may not have changed the screen)
                 }
                 .onFailure {
-                    if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
+                    if (generation == navigationGeneration) { uiState = uiState.copy(loading = false, error = it.message); reconcileChatChange() }
                 }
         }
     }
@@ -2903,11 +3080,19 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     /** True while the open chat is a Kanban worker's transcript: nothing sends to it or changes it. */
     private fun readOnlyActiveChat(): Boolean = uiState.activeChat?.readOnly == true
 
-    fun openBot(profile: HermesProfile) {
-        val repo = repository ?: return
+    fun openBot(profile: HermesProfile) = openBot(profile, talk = null)
+
+    private fun openBot(profile: HermesProfile, talk: Pair<java.io.File, Long>?) {
+        val repo = repository ?: run { talk?.first?.delete(); return }
         rememberChatOrigin()
-        val generation = ++navigationGeneration
+        // A navigation: a waiting note of an earlier open is dropped by the reconcile in navigate().
+        val generation = navigate()
+        val connection = uiState.activeConnectionId.orEmpty()
+        // Held before the open starts, so even an open that fails at once settles (discards) it. It stays only while
+        // the screen is still this one or shows this bot's chat (every reconcile checks), and only this open sends it.
+        if (talk != null) pendingTalk.hold(profile.name, generation, connection, chatViewOf(uiState, connectionEpoch), talk)
         resetStream()
+        beginChatOpen()
         viewModelScope.launch {
             uiState = uiState.copy(
                 loading = true,
@@ -2917,12 +3102,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             val (claimKickoff, releaseKickoff) = kickoffClaims()
             runCatching { repo.openBotChat(profile, claimKickoff, releaseKickoff) }
                 .onSuccess { chat ->
-                    if (generation == navigationGeneration) {
+                    val current = generation == navigationGeneration && repository === repo
+                    if (current) {
                         resetStream(chat.streamingText)
                         uiState = uiState.copy(
                             // Switch only now: switching first showed the Chats list while the chat loaded.
                             section = MainSection.CHAT,
-                            activeChat = chat.copy(title = profile.label, streamingText = ""),
+                            activeChat = chat.copy(title = profile.label, streamingText = "", botChat = true),
                             sessionUsage = null,
                             loading = false,
                             tools = emptyList(),
@@ -2930,13 +3116,25 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                         )
                         loadChatEnhancements(chat.copy(title = profile.label))
                         markChatSeen(chat.storedSessionId)
+                        reconcileChatChange() // the open is over (it may not have changed the screen)
                     }
+                    // Only this very open, still current, on the same connection, sends the note it was started for.
+                    pendingTalk.settle(generation, profile.name, connection, current && uiState.activeConnectionId.orEmpty() == connection)
+                        ?.let { (file, ms) -> sendChatVoiceNote(file, ms) }
                 }
                 .onFailure {
-                    if (generation == navigationGeneration) uiState = uiState.copy(loading = false, error = it.message)
+                    if (generation == navigationGeneration) { uiState = uiState.copy(loading = false, error = it.message); reconcileChatChange() }
+                    pendingTalk.settle(generation, profile.name, connection, current = false)
                 }
         }
     }
+
+    /**
+     * "Talk to …" on the bots page: the note goes into that bot's one chat, through the same path as a note recorded
+     * in the chat (pending bubble, transcript, audio attachment), once the chat is open. It is bound to the open
+     * started here: if anything else is opened first, or that open fails, the recording is discarded, never sent later.
+     */
+    fun talkToBot(profile: HermesProfile, file: java.io.File, durationMs: Long) = openBot(profile, talk = file to durationMs)
 
     fun loadOlderMessages() {
         val repo = repository ?: return
@@ -2966,7 +3164,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun branchSession(session: HermesSession) {
         val repo = repository ?: return
         rememberChatOrigin()
-        val generation = ++navigationGeneration
+        val generation = navigate()
         resetStream()
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null, section = MainSection.CHAT)
@@ -3039,7 +3237,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     fun createBot(name: String, title: String, description: String, cloneFrom: String? = null) {
         val repo = repository ?: return
         rememberChatOrigin()
-        val generation = ++navigationGeneration
+        val generation = navigate()
         viewModelScope.launch {
             uiState = uiState.copy(loading = true, error = null)
             val (claimKickoff, releaseKickoff) = kickoffClaims()
@@ -3052,7 +3250,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             snackbar = string(R.string.i18n_vm_bot_created, profile.label),
                             section = MainSection.CHAT,
                             selectedProfile = profile.name,
-                            activeChat = chat.copy(title = profile.label, streamingText = ""),
+                            activeChat = chat.copy(title = profile.label, streamingText = "", botChat = true),
                             tools = emptyList(),
                             loadingOlderMessages = false
                         )
@@ -3095,6 +3293,61 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 }
             }
         }
+    }
+
+    private var botDetailsGeneration = 0L
+
+    /**
+     * The bot chat's header: Bot details over that chat (P4). Not a navigation — the chat stays open behind it, as with
+     * Search — but the chat is no longer visible, so the uiState setter reconciles (a waiting Talk note is dropped,
+     * waiting approval cards go to the dialog and come back when details closes). Loads the Library; routines and board
+     * cards come from the lists the app already keeps, refreshed here.
+     */
+    fun openBotDetails(profile: HermesProfile) {
+        val chat = uiState.activeChat ?: return
+        if (uiState.section != MainSection.CHAT || chat.profile != profile.name ||
+            com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, uiState.profiles) == null) return
+        val repo = repository ?: return
+        val generation = ++botDetailsGeneration
+        uiState = uiState.copy(botDetails = com.nousresearch.hermesmobile.data.BotDetailsState(profile.name))
+        refreshCron()
+        if (uiState.kanbanAvailable) refreshKanban()
+        viewModelScope.launch {
+            runCatching {
+                val first = repo.rest.sessionMessagesPage(chat.storedSessionId, chat.profile, limit = 200, offset = 0, order = "latest")
+                val older = if (first.hasOlder) runCatching {
+                    repo.rest.sessionMessagesPage(chat.storedSessionId, chat.profile, limit = 200, offset = first.returned, order = "latest").messages
+                }.getOrDefault(emptyList()) else emptyList()
+                // What the chat already holds (live rows included) counts too.
+                com.nousresearch.hermesmobile.data.BotDetails.library(first.messages + older + chat.messages)
+            }.onSuccess { items ->
+                val open = uiState.botDetails
+                if (generation == botDetailsGeneration && repository === repo && open?.profile == profile.name) {
+                    uiState = uiState.copy(botDetails = open.copy(library = items, libraryError = null))
+                }
+            }.onFailure { t ->
+                val open = uiState.botDetails
+                if (generation == botDetailsGeneration && repository === repo && open?.profile == profile.name) {
+                    uiState = uiState.copy(botDetails = open.copy(library = emptyList(), libraryError = t.message))
+                }
+            }
+        }
+    }
+
+    /** Back from Bot details: the bot's chat shows again (its waiting approvals come back as cards). */
+    fun closeBotDetails() {
+        botDetailsGeneration += 1
+        if (uiState.botDetails != null) uiState = uiState.copy(botDetails = null)
+    }
+
+    /**
+     * "Start fresh with <bot>…" (Bot details). Hermes Bot Mode never resets a bot's one chat — Desktop turns /new in it
+     * into /compact — so this compacts it: a fresh working context in the same chat, memory and routines kept. Back on
+     * the chat first, so the result shows where it happened.
+     */
+    fun startFreshWithBot() {
+        closeBotDetails()
+        compressActiveChat()
     }
 
     /** Pin / unpin from the Agents list. Saved on the gateway (ui_meta), so it syncs across devices. */
@@ -4161,6 +4414,88 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         completeInteraction(interaction.requestId)
     }
 
+    // ---- Inline approval cards (bot chats) -------------------------------------------------------------------
+    private val approvalStore by lazy { com.nousresearch.hermesmobile.data.ApprovalCardStore(getApplication()) }
+
+    private fun showInlineApproval(request: ServerInteraction) {
+        completeInteraction(request.requestId) // never both a card and a dialog for one request
+        val card = com.nousresearch.hermesmobile.data.ApprovalCards.fromRequest(request.requestId, request.params, System.currentTimeMillis())
+        uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.upsert(uiState.approvalCards, card))
+    }
+
+    /**
+     * THE single reconcile of per-chat state (Tzvi, 2026-11-15: one place, not path by path). It runs on every change of
+     * what is on screen — the [uiState] setter calls it whenever the open chat, page, room, channels list or connection
+     * changes, whichever path changed it — and on every navigation intent through [navigate], before the screen changes.
+     * Each run, via [com.nousresearch.hermesmobile.data.ChatChange]:
+     *  - (a) discards a pending "Talk to …" recording that is no longer for what is happening (P1);
+     *  - (b) sends waiting approval cards of a bot chat no longer on screen to the dialog, and the dialog's (and held)
+     *    approvals for the bot chat on screen back into it as cards, with its answered cards (P2);
+     *  - drops approvals of an ended connection.
+     */
+    private fun reconcileChatChange() {
+        if (!chatChangeArmed || reconcilingChatChange) return
+        reconcilingChatChange = true
+        try {
+            // The channels list belongs to the bots page and Bot details to its bot's chat: close them once those are gone.
+            val settled = settleOverlays(uiState)
+            if (settled != uiState) uiStateValue = settled
+            chatOpeningJob?.cancel()
+            val chat = uiState.activeChat
+            val view = chatViewOf(uiState, connectionEpoch)
+            val moves = chatChange.reconcile(view, navigationGeneration, listOfNotNull(uiState.interaction) + uiState.interactionQueue)
+            val surface = view.surface
+            val pending = approvalRouter.pendingIds
+            val stored = chat?.takeIf { surface != null }?.let { approvalStore.load(it.profile, it.storedSessionId) }.orEmpty()
+            val keepPending = uiState.approvalCards.filter { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING && it.requestId in pending }
+            uiState = uiState.copy(approvalCards = (stored + keepPending).sortedBy { it.createdAtMs })
+            moves.toCards.forEach(::showInlineApproval)
+            moves.toDialog.forEach(::enqueueInteraction)
+        } finally {
+            reconcilingChatChange = false
+        }
+        // Defensive: nothing above changes the view, but if it ever does, the new view is reconciled too.
+        if (chatChange.differs(chatViewOf(uiState, connectionEpoch))) reconcileChatChange()
+    }
+
+    /**
+     * A navigation intent (open a chat or a bot, new chat, branch, create a bot, open a channel or the channels list,
+     * close the chat, disconnect): it supersedes any open still in flight, and per-chat state is reconciled at once,
+     * before the screen changes. Returns the new navigation generation.
+     */
+    private fun navigate(): Long {
+        val generation = ++navigationGeneration
+        // A navigation from outside the palette (a push tap) must not land hidden behind Search or Bot details.
+        if (uiState.searchOpen || uiState.botDetails != null) uiState = uiState.copy(searchOpen = false, botDetails = null)
+        reconcileChatChange()
+        return generation
+    }
+
+    private var chatOpeningJob: Job? = null
+
+    /** A chat is about to open (or re-resume): hold its replayed approvals until it is on screen, 15 s at most. */
+    private fun beginChatOpen() {
+        approvalRouter.beginOpen()
+        chatOpeningJob?.cancel()
+        chatOpeningJob = viewModelScope.launch { delay(15_000); if (approvalRouter.opening) reconcileChatChange() }
+    }
+
+    fun answerInlineApproval(requestId: String, choice: String) {
+        if (choice !in setOf("once", "always", "deny")) return
+        // "Always" only where Hermes offered it on this request.
+        if (choice == "always" && uiState.approvalCards.none { it.requestId == requestId && it.allowAlways }) return
+        val request = approvalRouter.answer(requestId) ?: return
+        repository?.gateway?.respond(request.requestId, JSONObject().put("choice", choice))
+        val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(uiState.approvalCards, requestId, choice, System.currentTimeMillis())
+        uiState = uiState.copy(approvalCards = cards)
+        uiState.activeChat?.let { approvalStore.save(it.profile, it.storedSessionId, cards) }
+    }
+
+    private fun withdrawInlineApproval(requestId: String) {
+        if (!approvalRouter.withdraw(requestId)) return
+        uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.withdraw(uiState.approvalCards, requestId))
+    }
+
     private fun enqueueInteraction(request: ServerInteraction) {
         val current = uiState.interaction
         if (current?.requestId == request.requestId ||
@@ -4237,13 +4572,14 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 if (transport == transportGeneration) refreshSessions()
                 return@launch
             }
+            beginChatOpen()
             runCatching { repo.resumeSession(storedId, current.profile, current.title) }
                 .onSuccess { resumed ->
                     val foreground = uiState.activeChat
                     if (transport == transportGeneration && repository === repo && generation == navigationGeneration && foreground?.storedSessionId == storedId) {
                         resetStream(resumed.streamingText)
                         uiState = uiState.copy(
-                            activeChat = resumed.copy(title = current.title, streamingText = "", model = sessionModelPins[current.runtimeSessionId]?.model ?: resumed.model, provider = sessionModelPins[current.runtimeSessionId]?.provider ?: resumed.provider, reasoningEffort = sessionModelPins[current.runtimeSessionId]?.reasoning ?: resumed.reasoningEffort),
+                            activeChat = resumed.copy(title = current.title, botChat = current.botChat, streamingText = "", model = sessionModelPins[current.runtimeSessionId]?.model ?: resumed.model, provider = sessionModelPins[current.runtimeSessionId]?.provider ?: resumed.provider, reasoningEffort = sessionModelPins[current.runtimeSessionId]?.reasoning ?: resumed.reasoningEffort),
                             tools = emptyList()
                         )
                         sessionModelPins.remove(current.runtimeSessionId)?.let { pin ->
@@ -4257,6 +4593,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }
                 }
                 .onFailure { if (transport == transportGeneration && generation == navigationGeneration && repository === repo && uiState.connectionState == GatewayConnectionState.CONNECTED) uiState = uiState.copy(error = it.message) }
+            if (transport == transportGeneration) reconcileChatChange()
             if (transport == transportGeneration) refreshSessions()
         }
     }
@@ -4266,7 +4603,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     override fun onServerRequest(request: ServerInteraction) {
         viewModelScope.launch(Dispatchers.Main.immediate) {
             when (request.method) {
-                "approval", "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
+                // A card only for the bot chat on screen; while a chat opens its replayed requests wait to be sorted.
+                "approval" -> when (approvalRouter.onRequest(request, chatViewOf(uiState, connectionEpoch).surface)) {
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.CARD -> showInlineApproval(request)
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.HOLD -> Unit
+                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.DIALOG -> enqueueInteraction(request)
+                }
+                "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
                     enqueueInteraction(request)
                 else ->
                     repository?.gateway?.reject(
@@ -4308,7 +4651,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     handleLiveStatus(type, payload)
                 "request.cancel" -> {
                     val id = payload.optString("id")
-                    if (id.isNotBlank()) completeInteraction(id)
+                    if (id.isNotBlank()) {
+                        completeInteraction(id)
+                        withdrawInlineApproval(id)
+                    }
                 }
                 "session.info" -> {
                     applyUsageEvent(payload)
@@ -4569,6 +4915,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     override fun onCleared() {
+        pendingTalk.drop()
         persistCurrentComposerNow()
         readyWaiter?.cancel()
         streamFlushJob?.cancel()
@@ -4579,6 +4926,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         super.onCleared()
     }
 
+    // Last initializer of the class: every member the chat-change reconcile uses is set from here on.
+    init {
+        chatChangeArmed = true
+        reconcileChatChange()
+    }
+
     companion object {
         /** Opening a room: live tail window, and the most a saved tail may lag before it is dropped (4 pages x 500 on the first sync). */
         private const val GROUP_TAIL_WINDOW = 400L
@@ -4586,6 +4939,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         private const val LIVE_SESSIONS_POLL_MS = 4_000L
         /** The gateway's refusal of `session.resume` for a Kanban worker's transcript (tui_gateway `_resume_guard`). */
         private const val KANBAN_RESUME_REFUSED = 4132
+        /** The page the app opens on and back returns to: the bots (bot-first home). */
+        val START_SECTION = MainSection.BOTS
+        /** Avatars are re-fetched on entering the bots page at most this often. */
+        private const val AVATAR_FENCE_MS = 5 * 60_000L
         private const val NAV_SECTION = "nav.section"
         private const val NAV_SESSION = "nav.session"
         private const val NAV_PROFILE = "nav.profile"

@@ -1,20 +1,21 @@
 package com.nousresearch.hermesmobile.push
 
-import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.util.Base64
-import java.io.File
 
 /** Pure rules for per-bot notification groups, file merging and the bot avatar. */
 object PushGrouping {
     /** A file push this soon after a text push from the same bot joins that notification. */
     const val MERGE_WINDOW_MS = 10_000L
 
-    fun groupKey(profile: String) = "hermes_bot_$profile"
-    fun summaryTag(profile: String) = "summary:$profile"
+    /**
+     * One bot on one server: the identity of its notification group, summary and file-merge slot. Two servers can
+     * both have an "ezra"; keyed by profile alone their notices shared one group and the summary opened the wrong one.
+     */
+    fun conversationKey(connection: String, profile: String) = "$connection|$profile"
+    fun groupKey(connection: String, profile: String) = "hermes_bot_" + conversationKey(connection, profile)
+    fun summaryTag(connection: String, profile: String) = "summary:" + conversationKey(connection, profile)
 
     /** "Della · 2" */
     fun summaryText(profile: String, count: Int) = "${botName(profile)} · $count"
@@ -31,22 +32,10 @@ object PushGrouping {
         else -> "Open file"
     }
 
-    // ---- avatar cache: the app saves each bot's avatar when it loads it; a push shows it as the large icon ----
-    private fun avatarFile(context: Context, profile: String) =
-        File(File(context.filesDir, "push_avatars"), profile.replace(Regex("[^A-Za-z0-9_-]"), "_"))
+    // ---- the bot's photo as a round icon (saved photos live in PushAvatars; no network in the push path) ----
 
-    /** Stores a gateway data URL (or removes the file when [dataUrl] is blank). */
-    fun saveAvatar(context: Context, profile: String, dataUrl: String?) = runCatching {
-        val f = avatarFile(context, profile)
-        if (dataUrl.isNullOrBlank()) { f.delete(); return@runCatching }
-        val bytes = Base64.decode(dataUrl.substringAfter("base64,", dataUrl), Base64.DEFAULT)
-        f.parentFile?.mkdirs()
-        f.writeBytes(bytes)
-    }
-
-    /** Round bot avatar, or a coloured circle with the bot's initial. */
-    fun largeIcon(context: Context, profile: String, size: Int = 128): Bitmap {
-        val photo = runCatching { avatarFile(context, profile).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) } }.getOrNull()
+    /** Round bot avatar, or a coloured circle with the bot's initial when no photo is saved. */
+    fun roundAvatar(photo: Bitmap?, profile: String, size: Int = 128): Bitmap {
         val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)

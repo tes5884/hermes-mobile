@@ -1167,7 +1167,7 @@ class HermesRepository(
 
     companion object {
         private const val BOT_CHAT_TITLE = "Bot Chat"
-        private const val BOT_META_KEY = "hermes-bots"
+        const val BOT_META_KEY = "hermes-bots"
         private const val BOT_KICKOFF_TEXT = "Hey, tell me about yourself!"
         private const val GROUP_INITIAL_EVENT_WINDOW = 400L
         private const val GROUP_LOCAL_EVENT_LIMIT = 1200

@@ -74,13 +74,13 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
 
         // System back returns to the page visited before, then to Home, the start destination (screens with
         // their own back stack — an open chat, sub-pages — register deeper handlers that win).
-        androidx.activity.compose.BackHandler(enabled = s.section != MainSection.HOME || vm.canNavigateBack) { vm.navigateBack() }
+        androidx.activity.compose.BackHandler(enabled = vm.canNavigateBack) { vm.navigateBack() }
         val wide = LocalWindowInfo.current.containerSize.width / LocalDensity.current.density >= 720f
-        var searchOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-        if (searchOpen) SearchPalette(
+        // Search's open state is view-model state, so opening it runs the chat-change reconcile (Shomer t_4b71caa6).
+        if (s.searchOpen) SearchPalette(
             s = s,
             kanbanAvailable = s.kanbanAvailable,
-            onDismiss = { searchOpen = false },
+            onDismiss = { vm.showSearch(false) },
             onOpenSession = vm::openSession,
             onSection = { section -> if (section == MainSection.CHAT) vm.closeActiveChat() else vm.switchSection(section) },
             onNewChat = { vm.newChat() },
@@ -100,7 +100,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                     kanbanAvailable = s.kanbanAvailable,
                     onKanban = { vm.switchSection(MainSection.KANBAN) },
                     onClose = { scope.launch { drawerState.close() } },
-                    onSearch = { searchOpen = true },
+                    onSearch = { vm.showSearch(true) },
                     // Recents is pure recency, as in Desktop: pinning only orders the Chats list.
                     recentSessions = remember(s.sessions) {
                         com.nousresearch.hermesmobile.data.HermesSession.collapseLineages(s.sessions)
@@ -174,7 +174,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                     FloatingActionButton(onClick = { vm.newChat() }, containerColor = MaterialTheme.hermes.accentTint,
                         contentColor = MaterialTheme.colorScheme.primary, elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
                         modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)) { Icon(Icons.Outlined.AddComment, stringResource(R.string.ui_db18382a24)) }
-                    listOf(MainSection.HOME to Icons.Default.SpaceDashboard, MainSection.CHAT to Icons.AutoMirrored.Filled.Chat, MainSection.BOTS to Icons.Default.SmartToy,
+                    listOf(MainSection.BOTS to Icons.Default.SmartToy, MainSection.HOME to Icons.Default.SpaceDashboard, MainSection.CHAT to Icons.AutoMirrored.Filled.Chat,
                         MainSection.CAPABILITIES to Icons.Default.Psychology, MainSection.FILES to Icons.Default.FolderOpen,
                         MainSection.CRON to Icons.Default.Schedule, MainSection.MORE to Icons.Default.Settings).forEach { (section, icon) ->
                         NavigationRailItem(selected = s.section == section, onClick = { if(section == MainSection.CHAT) vm.closeActiveChat() else vm.switchSection(section) },
@@ -186,7 +186,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                 // Rooms: a tapped file link opens the same viewer as 1:1, with the posting bot's profile.
                 var roomFile by remember { mutableStateOf<com.nousresearch.hermesmobile.ui.components.RoomArtifact?>(null) }
                 when (s.section) {
-                    MainSection.HOME -> ExperienceHome(s, openDrawer, vm::switchSection, { vm.newChat() }, vm::openSession) { searchOpen = true }
+                    MainSection.HOME -> ExperienceHome(s, openDrawer, vm::switchSection, { vm.newChat() }, vm::openSession) { vm.showSearch(true) }
                     MainSection.SYSTEM -> vm.featureRepository()?.let { repo -> key(repo, s.selectedProfile) {
                         SystemPage(repo, s.selectedProfile, s.profiles.map { it.name }, vm::selectProfile, onMenu = openDrawer) { vm.switchSection(MainSection.SERVER_SETTINGS) }
                     } }
@@ -233,7 +233,7 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onSwitchConnection = vm::switchConnection,
                         onOpen = vm::openBot,
                         onCreate = vm::createBot,
-                        onNewChat = vm::newBotSideChat,
+                        onTalk = vm::talkToBot,
                         onEdit = vm::editBot,
                         onSaveEditor = vm::saveBotEditor,
                         onSetPinned = vm::setBotPinned,
@@ -243,6 +243,8 @@ fun HermesMobileApp(vm: HermesViewModel = viewModel()) {
                         onCreateGroup = vm::createGroup,
                         onOpenGroup = vm::openGroup,
                         onCloseGroup = vm::closeGroup,
+                        channelsOpen = s.channelsListOpen,
+                        onShowChannels = vm::showChannels,
                         onSendGroup = vm::sendGroupMessage,
                         onReplyGroupThread = vm::setGroupReplyThread,
                         onRenameGroup = vm::renameGroup,
@@ -578,6 +580,48 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
             )
         }
     ) {
+    // Bot details (P4) covers the bot's chat while it is open; the chat stays open underneath.
+    val detailsProfile = s.botDetails?.let { d -> chat?.let { c -> botChatProfile(c, s.profiles) }?.takeIf { it.name == d.profile } }
+    if (detailsProfile != null && chat != null && s.botDetails != null) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val connection = s.activeConnectionId.orEmpty()
+        var quiet by remember(connection, detailsProfile.name) {
+            mutableStateOf(com.nousresearch.hermesmobile.push.PushDelivery.quietBot(context, connection, detailsProfile.name))
+        }
+        val dot = com.nousresearch.hermesmobile.data.LiveSessions.dotFor(s.sessionDots, chat.storedSessionId)
+        val waiting = s.interaction?.takeIf { it.method == "approval" && it.params.optString("session_id") == chat.runtimeSessionId }
+        val status = when {
+            waiting != null || dot == com.nousresearch.hermesmobile.data.SessionDot.NEEDS_INPUT ->
+                com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.NEEDS_OK, "")
+            chat.running || dot == com.nousresearch.hermesmobile.data.SessionDot.WORKING ->
+                com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.WORKING, s.liveStatuses.lastOrNull()?.label.orEmpty())
+            else -> com.nousresearch.hermesmobile.data.BotHome.Status(com.nousresearch.hermesmobile.data.BotHome.Kind.IDLE, "")
+        }
+        com.nousresearch.hermesmobile.ui.screens.BotDetailsScreen(
+            profile = detailsProfile,
+            avatar = vm.avatarAssets[detailsProfile.name],
+            state = s.botDetails,
+            status = status,
+            routines = remember(s.cronJobs, detailsProfile.name) { com.nousresearch.hermesmobile.data.BotDetails.routines(s.cronJobs, detailsProfile.name) },
+            cards = if (s.kanbanAvailable) remember(s.kanbanSnapshot, detailsProfile.name) {
+                com.nousresearch.hermesmobile.data.BotDetails.cards(s.kanbanSnapshot, detailsProfile.name)
+            } else null,
+            quiet = quiet,
+            actions = com.nousresearch.hermesmobile.ui.screens.BotDetailsActions(
+                onBack = vm::closeBotDetails,
+                onEdit = { vm.editBot(detailsProfile) },
+                onOpenFile = { artifact = it },
+                onRoutine = { job, on -> if (on) vm.resumeCron(job) else vm.pauseCron(job) },
+                onAllRoutines = { vm.switchSection(MainSection.CRON) },
+                onOpenBoard = { vm.switchSection(MainSection.KANBAN) },
+                onQuiet = { on ->
+                    com.nousresearch.hermesmobile.push.PushDelivery.setQuietBot(context, connection, detailsProfile.name, on)
+                    quiet = on
+                },
+                onStartFresh = vm::startFreshWithBot
+            )
+        )
+    } else
     ChatScreen(
         profiles = s.profiles,
         sessions = s.sessions,
@@ -650,6 +694,10 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         onBack = vm::closeActiveChat,
         onMenu = onMenu,
         listHeader = listHeader,
+        botAvatars = vm.avatarAssets,
+        onBotDetails = vm::openBotDetails,
+        approvalCards = s.approvalCards,
+        onApproval = vm::answerInlineApproval,
         routines = com.nousresearch.hermesmobile.ui.screens.RoutineActions(
             jobs = s.cronJobs,
             runs = s.cronRuns,
@@ -668,6 +716,16 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         )
     )
     }
+    // The bot header's avatar, here too (Bot details and the editor render from this subtree).
+    if (chat != null) {
+        val botProfile = remember(chat.profile, chat.storedSessionId, chat.botChat, s.profiles) { botChatProfile(chat, s.profiles) }
+        if (botProfile != null) LaunchedEffect(botProfile.name, botProfile.hasAvatar) { vm.ensureAvatar(botProfile) }
+    }
+    s.botEditor?.let {
+        BotEditorDialog(config = it, saving = s.botEditorSaving, onDismiss = vm::closeBotEditor, onSave = vm::saveBotEditor,
+            sectionOptions = remember(s.profiles) { s.profiles.filter { p -> p.isBot }.map { p -> p.botSection }.filter { n -> n.isNotBlank() }.distinct().sortedBy { n -> n.lowercase() } })
+    }
+    if (s.botEditorLoadingProfile != null) LinearProgressIndicator(Modifier.fillMaxWidth())
 }
 
 @Composable

@@ -616,7 +616,9 @@ data class ActiveChat(
     /** A sent message being edited: sending rewinds the chat to it and runs it again, as in Desktop. */
     val editing: EditingTurn? = null,
     /** A transcript opened without resuming it (a Kanban worker's): no runtime session, nothing to send to. */
-    val readOnly: Boolean = false
+    val readOnly: Boolean = false,
+    /** Opened as a bot's one continuous chat (Bot Mode's canonical Bot Chat): bot header, no session switcher. */
+    val botChat: Boolean = false
 )
 
 /**
@@ -875,13 +877,35 @@ data class GroupPeerRoute(
     }
 }
 
+/**
+ * One live room task from `groups.state` → `driver.member_activity` (who is answering right now): `status` is
+ * queued / running / stopping; `tool` is the tool it is in, known only when this gateway runs the turn.
+ */
+data class GroupMemberActivity(
+    val memberId: String,
+    val status: String,
+    val tool: String = "",
+    val startedAt: Double = 0.0
+) {
+    companion object {
+        fun fromJson(o: JSONObject) = GroupMemberActivity(
+            memberId = o.optString("member_id"),
+            status = o.optString("status"),
+            tool = if (o.isNull("tool")) "" else o.optString("tool"),
+            startedAt = o.optDouble("started_at", 0.0).takeUnless { it.isNaN() } ?: 0.0
+        )
+    }
+}
+
 data class GroupDriverStatus(
     val running: Boolean = false,
     val working: Boolean = false,
     val blocked: Boolean = false,
     val pendingActions: List<GroupPendingAction> = emptyList(),
     val peerRoutes: List<GroupPeerRoute> = emptyList(),
-    val counts: Map<String, Int> = emptyMap()
+    val counts: Map<String, Int> = emptyMap(),
+    /** Absent from older gateways (then empty: no typing lines). */
+    val memberActivity: List<GroupMemberActivity> = emptyList()
 ) {
     companion object {
         fun fromJson(o: JSONObject?): GroupDriverStatus {
@@ -900,7 +924,9 @@ data class GroupDriverStatus(
                 blocked = o.optBoolean("blocked", false),
                 pendingActions = (o.optJSONArray("pending_actions") ?: JSONArray()).objects().map(GroupPendingAction::fromJson),
                 peerRoutes = (o.optJSONArray("peer_routes") ?: JSONArray()).objects().map(GroupPeerRoute::fromJson),
-                counts = counts
+                counts = counts,
+                memberActivity = (o.optJSONArray("member_activity") ?: JSONArray()).objects().map(GroupMemberActivity::fromJson)
+                    .filter { it.memberId.isNotBlank() }
             )
         }
     }
@@ -927,7 +953,9 @@ data class ActiveGroupRoom(
     val replyThreadId: String? = null,
     val composerAttachments: List<ComposerAttachment> = emptyList(),
     /** Opening a room never waits on the server: it shows saved messages and this says where the sync stands. */
-    val link: RoomLink = RoomLink.CONNECTING
+    val link: RoomLink = RoomLink.CONNECTING,
+    /** Approvals answered from this phone in this channel (stored per channel), so the collapsed card survives a reload. */
+    val approvalCards: List<ApprovalCards.Card> = emptyList()
 )
 
 

@@ -35,7 +35,22 @@ object ChatMedia {
         return images.joinToString("\n\n") + if (rest.isEmpty()) "" else "\n\n$rest"
     }
 
+    /** The path of every `MEDIA:` delivery in [text], in order, as [render] would link it (bot details' Library). */
+    fun paths(text: String): List<String> {
+        if ("MEDIA:" !in text) return emptyList()
+        return TAG.findAll(text).mapNotNull { match -> target(match.groupValues[1])?.first }.toList()
+    }
+
     private fun link(value: String): String? {
+        val (path, punctuation) = target(value) ?: return null
+        val name = path.split('/', '\\').lastOrNull { it.isNotEmpty() } ?: path
+        val label = name.replace(Regex("[\\[\\]\\\\]")) { "\\" + it.value }
+        val image = name.substringAfterLast('.', "").lowercase() in IMAGES
+        return "${if (image) "!" else ""}[$label](<$path>)$punctuation"
+    }
+
+    /** A tag's path and the sentence punctuation that followed it, or null when it is not a plausible path. */
+    private fun target(value: String): Pair<String, String>? {
         val raw = value.trim()
         val quoted = raw.length >= 2 && raw.first() in "\"'`" && raw.first() == raw.last()
         var path = if (quoted) raw.substring(1, raw.length - 1) else raw.removeSuffix("`").removeSuffix("\"")
@@ -47,10 +62,7 @@ object ChatMedia {
             }
         }
         if (!plausible(path) || path.any { it == '<' || it == '>' || it == '\n' }) return null
-        val name = path.split('/', '\\').lastOrNull { it.isNotEmpty() } ?: path
-        val label = name.replace(Regex("[\\[\\]\\\\]")) { "\\" + it.value }
-        val image = name.substringAfterLast('.', "").lowercase() in IMAGES
-        return "${if (image) "!" else ""}[$label](<$path>)$punctuation"
+        return path to punctuation
     }
 
     /** A path separator, or a dot with something after it: `...` or a plain word stays prose. */
