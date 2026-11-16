@@ -40,6 +40,9 @@ class GatewayRpcException(
     val data: Any? = null
 ) : IllegalStateException(message)
 
+/** The request never left this phone (no socket, or the socket refused the frame): the gateway cannot have it. */
+class GatewayNotSentException(message: String) : IllegalStateException(message)
+
 interface HermesGatewayListener {
     fun onConnectionState(state: GatewayConnectionState, error: String? = null) {}
     fun onGatewayReady(payload: JSONObject) {}
@@ -254,11 +257,11 @@ class HermesGatewayClient(
 
         val serialized = frame.toString()
         synchronized(this) {
-            val ws = socket ?: error("Gateway WebSocket is not connected")
+            val ws = socket ?: throw GatewayNotSentException("Gateway WebSocket is not connected")
             pending[id] = PendingCall(deferred)
             if (!ws.send(serialized)) {
                 pending.remove(id)
-                error("Could not send gateway request")
+                throw GatewayNotSentException("Could not send gateway request")
             }
         }
 

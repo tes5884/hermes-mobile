@@ -6,78 +6,80 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.CoroutineContext
 
-/** Where chats' composers are saved (draft, attachments, queue), by composer key. */
+/** Where chats' drafts are saved, by composer key. */
 interface ComposerSaves {
     fun load(key: String): ChatComposerStore.State
     fun save(key: String, state: ChatComposerStore.State)
 }
 
 /**
- * Keeps a send the gateway did not take in the chat it was written in, whether that chat is still on screen, was left,
- * or is opening again right now (Shomer t_8d113995: a refusal that came back after you left the chat was dropped).
+ * Which chat's draft is on screen (Shomer t_478c28f5, Medium 1). A chat that is opening shows the previous chat's (or
+ * an empty) composer until its own saved draft has loaded; saving the screen to that chat's key before then would write
+ * the stale screen over its saved draft. So the screen is saved as a chat's draft only with a [token] taken while that
+ * chat's own draft was on screen, and only while the same load is still the one shown.
  *
- * A chat's composer lives in one place at a time: on screen once [load] has shown it, otherwise in its saved copy.
- * [keep] writes to whichever that is; both run under one lock, so a refusal arriving while the chat opens lands in the
- * saved copy before the load reads it, or on screen after the load has shown it, never in between (lost).
+ * (Messages you sent never pass through here: they are the [Outbox]'s from the moment you press send.)
  */
 class ComposerKeeper(
     private val saves: ComposerSaves,
     private val io: CoroutineContext = Dispatchers.IO
 ) {
-    /** The composer on screen: which chat it is (stored session id + composer key) and its state. */
-    interface Screen {
-        /** The stored session of the writable chat on screen (null: none). */
-        val sessionId: String?
-        /** That chat's composer key (null: none). */
-        val key: String?
-        var state: ChatComposerStore.State
-        /** Save what is on screen now (the screen's own save; it is the newest). */
-        fun persist()
-    }
-
     private val lock = Mutex()
+    /** Bumped by every [beginLoad]: a token from before it is dead. */
+    @Volatile private var generation = 0L
+    /** The composer key whose own draft is on screen (null: none loaded). */
+    @Volatile private var loadedKey: String? = null
     @Volatile private var loadedSession: String? = null
 
-    /** A chat starts opening: until [load] shows its composer, what is on screen is not that chat's. */
+    /** A chat starts opening (or the chat closes): what is on screen belongs to no chat until [load] shows one. */
     fun beginLoad() {
+        generation += 1
+        loadedKey = null
         loadedSession = null
     }
 
-    /** Whether the composer on screen is this chat's own, loaded (its queue may drain). */
+    /** Whether the composer on screen is this chat's own, loaded. */
     fun isLoaded(sessionId: String?): Boolean = sessionId != null && loadedSession == sessionId
 
+    /** A token to save the screen as [key]'s draft: null unless that chat's own draft is the one on screen now. */
+    fun token(key: String): Long? = generation.takeIf { loadedKey == key }
+
+    private fun valid(key: String, token: Long?): Boolean = token != null && token == generation && loadedKey == key
+
+    /** The chat on screen was re-keyed (compression rotated its stored session id); its draft stays on screen. */
+    fun rekey(oldKey: String, key: String, sessionId: String) {
+        if (loadedKey == oldKey) {
+            loadedKey = key
+            loadedSession = sessionId
+        }
+    }
+
     /**
-     * Reads [key]'s saved composer and has [show] put it on screen; [show] returns false when the screen has moved on
+     * Reads [key]'s saved draft and has [show] put it on screen; [show] returns false when the screen has moved on
      * (nothing shown, nothing marked loaded). Returns what was shown.
      */
-    suspend fun load(key: String, sessionId: String, show: (ChatComposerStore.State) -> Boolean): ChatComposerStore.State? =
-        lock.withLock {
+    suspend fun load(key: String, sessionId: String, show: (ChatComposerStore.State) -> Boolean): ChatComposerStore.State? {
+        val mine = generation
+        return lock.withLock {
             val saved = withContext(io) { saves.load(key) }
-            if (!show(saved)) return@withLock null
+            if (mine != generation || !show(saved)) return@withLock null
+            loadedKey = key
             loadedSession = sessionId
             saved
         }
+    }
 
-    /**
-     * Applies [transform] to the composer of the chat [sessionId] (saved under [key]): on screen when that chat's own
-     * composer is there, else its saved copy. [beforeSave] runs first on the saved path (a save of it still under way).
-     * Returns true when it went on screen.
-     */
-    suspend fun keep(
-        key: String,
-        sessionId: String,
-        screen: Screen,
-        beforeSave: suspend () -> Unit = {},
-        transform: (ChatComposerStore.State) -> ChatComposerStore.State
-    ): Boolean = lock.withLock {
-        if (screen.sessionId == sessionId && screen.key == key && loadedSession == sessionId) {
-            screen.state = transform(screen.state)
-            screen.persist()
-            true
-        } else {
-            beforeSave()
-            withContext(io) { saves.save(key, transform(saves.load(key))) }
-            false
-        }
+    /** Saves [state] as [key]'s draft now, if [token] is still the live one for it. False: refused, nothing written. */
+    fun persistNow(key: String, token: Long?, state: ChatComposerStore.State): Boolean {
+        if (!valid(key, token)) return false
+        runCatching { saves.save(key, state) }
+        return true
+    }
+
+    /** Like [persistNow], off the main thread and after any load under way. */
+    suspend fun persist(key: String, token: Long?, state: ChatComposerStore.State): Boolean = lock.withLock {
+        if (!valid(key, token)) return@withLock false
+        withContext(io) { saves.save(key, state) }
+        true
     }
 }

@@ -101,6 +101,7 @@ fun ChatScreen(
     onUpdateQueued: (String, String) -> Unit,
     onMoveQueued: (String, Int) -> Unit,
     onClearQueue: () -> Unit,
+    onRetryQueued: (String) -> Unit = {},
     onSwitchModel: (SessionModelChoice, String) -> Unit,
     onSetReasoning: (String) -> Unit,
     onRefreshSessionMeta: () -> Unit,
@@ -135,7 +136,7 @@ fun ChatScreen(
         onLoadOlderMessages, onDraftChange, onAttach, onRemoveAttachment, onRemoveQueued, onUpdateQueued, onMoveQueued,
         onClearQueue, onSwitchModel, onSetReasoning, onRefreshSessionMeta, onSend, onStop, onSteer, onRetry, onBranchActive,
         onApplySlash, onDismissCommandOutput, onBack, onOpen, onNewChat, onOpenArtifact, onContext, onEditMessage, onCancelEdit, onConfirmEdit,
-        onOpenKanban
+        onOpenKanban, onRetryQueued = onRetryQueued
     )
 
     @Composable

@@ -1,12 +1,16 @@
 <resources>
-    <!-- Messages refused while the gateway's turn runs, and approvals of gateway turns (t_cde1eeab). -->
+    <!-- Messages refused while the gateway's turn runs, approvals of gateway turns (t_cde1eeab), and the outbox (t_e6f55bf7). -->
     <string name="queue_waiting_for_ok">%1$s is waiting for your OK above</string>
     <string name="queue_waiting_for_ok_show">Show</string>
     <string name="queue_held_for_turn">Queued, sends when %1$s\'s turn ends</string>
     <string name="queue_held_for_turn_generic">Queued, sends when the current turn ends</string>
-    <string name="queue_item_unconfirmed">May already be queued: check the chat. Edit it to send it again, or remove it. Messages after it wait.</string>
-    <string name="queue_item_not_sent">Not sent. Edit it to send it again, or remove it. Messages after it wait.</string>
-    <string name="queue_item_edit_not_applied">Your edit was not applied. Edit it to send it as a new message, or remove it. Messages after it wait.</string>
+    <string name="queue_item_unconfirmed">Not sure it sent: check the chat. Send it again, edit it, or remove it. Messages after it wait.</string>
+    <string name="queue_item_not_sent">Not sent. Send it again, edit it, or remove it. Messages after it wait.</string>
+    <string name="queue_item_edit_not_applied">Your edit was not applied. Send it as a new message, edit it, or remove it. Messages after it wait.</string>
+    <string name="queue_item_sending">Sending…</string>
+    <string name="queue_item_send_again">Send again</string>
+    <string name="queue_behind_held">Waiting behind a message that needs you</string>
+    <string name="queue_edit_waits">Send or remove the waiting messages before editing</string>
     <string name="queue_kept_in_chat">Not sent to %1$s. It is kept in that chat.</string>
     <string name="queue_kept_in_chat_generic">A message was not sent. It is kept in its chat.</string>
     <string name="gateway_approval_already">That approval was already answered or has ended.</string>

@@ -94,7 +94,9 @@ internal class ChatThreadActions(
     val onCancelEdit: () -> Unit,
     val onConfirmEdit: (Boolean) -> Unit,
     /** A Kanban worker's transcript is read-only; the banner opens the board only while Kanban is available. */
-    val onOpenKanban: (() -> Unit)?
+    val onOpenKanban: (() -> Unit)?,
+    /** Send again: a waiting message that was not sent, or may not have been (the outbox keeps it until you choose). */
+    val onRetryQueued: (String) -> Unit = {}
 )
 
 @Composable
@@ -315,7 +317,8 @@ internal fun ChatThread(
                                     onEdit = { editQueueItem = it },
                                     onRemove = actions.onRemoveQueued,
                                     onMove = actions.onMoveQueued,
-                                    onClear = actions.onClearQueue
+                                    onClear = actions.onClearQueue,
+                                    onRetry = actions.onRetryQueued
                                 )
                                 val noteActions = LocalChatVoiceNoteActions.current
                                 if (noteActions != null) noteActions.pendingVoice.filter { it.roomId == "chat:${chat.storedSessionId}" }.forEach { note ->
@@ -847,7 +850,8 @@ private fun QueueLane(
     onEdit: (QueuedPrompt) -> Unit,
     onRemove: (String) -> Unit,
     onMove: (String, Int) -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    onRetry: (String) -> Unit = {}
 ) {
     if (queuedPrompts.isEmpty()) return
     Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
@@ -872,18 +876,26 @@ private fun QueueLane(
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        // Never re-sent by itself, and what is queued after it waits (t_cde1eeab, Shomer t_8d113995).
+                        // From the outbox: never re-sent by itself when held, and what is queued after it waits
+                        // (Tzvi 2026-11-15, Shomer t_478c28f5).
                         val heldLabel = when (item.hold) {
                             QueuedPrompt.HOLD_UNCONFIRMED -> R.string.queue_item_unconfirmed
                             QueuedPrompt.HOLD_NOT_SENT -> R.string.queue_item_not_sent
                             QueuedPrompt.HOLD_EDIT -> R.string.queue_item_edit_not_applied
+                            QueuedPrompt.HOLD_SENDING -> R.string.queue_item_sending
                             else -> null
                         }
                         if (heldLabel != null) Text(
                             stringResource(heldLabel),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = if (item.hold == QueuedPrompt.HOLD_SENDING) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.error
                         )
+                    }
+                    // Going out now: nothing to do until the gateway answers.
+                    if (item.hold == QueuedPrompt.HOLD_SENDING) return@Row
+                    if (com.nousresearch.hermesmobile.data.OwnerRefusal.waitsForYou(item)) {
+                        TextButton(onClick = { onRetry(item.id) }) { Text(stringResource(R.string.queue_item_send_again)) }
                     }
                     IconButton(onClick = { onMove(item.id, -1) }, enabled = index > 0) {
                         Icon(Icons.Default.KeyboardArrowUp, stringResource(R.string.a22_move_up), Modifier.size(18.dp))

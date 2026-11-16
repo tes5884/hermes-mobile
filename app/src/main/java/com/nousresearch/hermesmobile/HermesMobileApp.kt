@@ -656,7 +656,8 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         tools = s.tools,
         draft = s.chatDraft,
         attachments = s.composerAttachments,
-        queuedPrompts = s.queuedPrompts,
+        // The open chat's outbox, minus one going out whose bubble the chat already shows.
+        queuedPrompts = com.nousresearch.hermesmobile.data.outboxLane(s.queuedPrompts, s.activeChat?.messages.orEmpty()),
         reasoningText = s.reasoningText,
         liveStatuses = s.liveStatuses,
         artifactSuggestions = s.artifactSuggestions,
@@ -703,6 +704,7 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         onUpdateQueued = vm::updateQueuedPrompt,
         onMoveQueued = vm::moveQueuedPrompt,
         onClearQueue = vm::clearQueuedPrompts,
+        onRetryQueued = vm::retryQueuedPrompt,
         onSwitchModel = vm::switchSessionModel,
         onSetReasoning = vm::setSessionReasoning,
         onRefreshSessionMeta = vm::refreshSessionMeta,

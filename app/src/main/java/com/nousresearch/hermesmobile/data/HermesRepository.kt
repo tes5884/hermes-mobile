@@ -120,7 +120,8 @@ class HermesRepository(
         val result = gateway.requestObject("prompt.submit", params, timeoutMs = 30_000)
         return PromptSubmitResult(
             status = result.optString("status"),
-            userRowId = result.optLongOrNull("user_row_id")
+            userRowId = result.optLongOrNull("user_row_id"),
+            admissionId = result.optString("admission_id").takeIf { it.isNotBlank() && it != "null" }
         )
     }
 

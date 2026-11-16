@@ -1,32 +1,28 @@
 package com.nousresearch.hermesmobile.data
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.security.KeyStore
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
-/** Encrypted per-conversation drafts and client-side send queue. */
+/**
+ * Encrypted per-conversation drafts (text + attachments). Messages you sent are not here: they live in the [Outbox]
+ * from the moment you press send, so nothing written to a composer can overwrite them. [State.queue] is only read, from
+ * composers saved by older versions, to move it into the outbox once.
+ */
 class ChatComposerStore(context: Context) : ComposerSaves {
     private val prefs = context.getSharedPreferences("hermes_mobile_chat", Context.MODE_PRIVATE)
-    private val alias = "hermes_mobile_chat_key"
 
     data class State(
         val draft: String = "",
         val attachments: List<ComposerAttachment> = emptyList(),
+        /** Legacy: a queue saved by an older version (moved into the outbox when the chat opens). */
         val queue: List<QueuedPrompt> = emptyList()
     )
 
     override fun load(key: String): State {
         val encoded = prefs.getString(key, null) ?: return State()
         return runCatching {
-            val root = JSONObject(decrypt(encoded))
+            val root = JSONObject(LocalCipher.decrypt(encoded))
             State(
                 draft = root.optString("draft"),
                 attachments = attachmentsFromJson(root.optJSONArray("attachments")),
@@ -50,23 +46,16 @@ class ChatComposerStore(context: Context) : ComposerSaves {
         }.getOrDefault(State())
     }
 
+    /** Saves the draft and its attachments (never a queue: sent messages are the outbox's). */
     override fun save(key: String, state: State) {
-        if (state.draft.isBlank() && state.attachments.isEmpty() && state.queue.isEmpty()) {
+        if (state.draft.isBlank() && state.attachments.isEmpty()) {
             prefs.edit().remove(key).apply()
             return
         }
         val root = JSONObject()
             .put("draft", state.draft)
             .put("attachments", attachmentsToJson(state.attachments))
-            .put("queue", JSONArray(state.queue.map { row ->
-                JSONObject()
-                    .put("id", row.id)
-                    .put("text", row.text)
-                    .put("created_at", row.createdAt)
-                    .put("attachments", attachmentsToJson(row.attachments))
-                    .apply { row.hold?.let { put("hold", it) } }
-            }))
-        prefs.edit().putString(key, encrypt(root.toString())).apply()
+        prefs.edit().putString(key, LocalCipher.encrypt(root.toString())).apply()
     }
 
     fun referencedAttachmentUris(): Set<String> = prefs.all.keys.flatMap { key ->
@@ -98,37 +87,5 @@ class ChatComposerStore(context: Context) : ComposerSaves {
                 )
             )
         }
-    }
-
-    private fun secretKey(): SecretKey {
-        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getKey(alias, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setRandomizedEncryptionRequired(true)
-                .build()
-        )
-        return generator.generateKey()
-    }
-
-    private fun encrypt(clear: String): String {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-        val body = cipher.doFinal(clear.toByteArray(Charsets.UTF_8))
-        val payload = ByteArray(cipher.iv.size + body.size)
-        cipher.iv.copyInto(payload)
-        body.copyInto(payload, cipher.iv.size)
-        return Base64.encodeToString(payload, Base64.NO_WRAP)
-    }
-
-    private fun decrypt(encoded: String): String {
-        val raw = Base64.decode(encoded, Base64.NO_WRAP)
-        require(raw.size > 12)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, raw.copyOfRange(0, 12)))
-        return String(cipher.doFinal(raw.copyOfRange(12, raw.size)), Charsets.UTF_8)
     }
 }

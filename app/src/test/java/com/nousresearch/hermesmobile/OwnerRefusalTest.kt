@@ -1,6 +1,6 @@
 package com.nousresearch.hermesmobile
 
-import com.nousresearch.hermesmobile.data.ChatComposerStore
+import com.nousresearch.hermesmobile.data.GatewayNotSentException
 import com.nousresearch.hermesmobile.data.GatewayRpcException
 import com.nousresearch.hermesmobile.data.OwnerRefusal
 import com.nousresearch.hermesmobile.data.OwnerRefusal.Banner
@@ -14,9 +14,8 @@ import org.junit.Test
 import java.io.File
 
 /**
- * t_cde1eeab: "The gateway is running a turn in this chat and the gateway refused it. Nothing was sent." A send refused
- * because the gateway's turn runs waits, visibly, and goes again by itself; one the gateway may already hold is kept but
- * never re-sent by itself; neither is ever lost.
+ * t_cde1eeab: "The gateway is running a turn in this chat and the gateway refused it. Nothing was sent." How a refusal
+ * is classified, and (Shomer t_478c28f5) that every send path of the ViewModel goes through the one outbox.
  */
 class OwnerRefusalTest {
     private fun refusal(reason: String?) = GatewayRpcException(
@@ -43,103 +42,16 @@ class OwnerRefusalTest {
         assertEquals(QueuedPrompt.HOLD_NOT_SENT, OwnerRefusal.holdFor(GatewayRpcException("model needs confirmation"), submitted = true))
         assertEquals(QueuedPrompt.HOLD_NOT_SENT, OwnerRefusal.holdFor(IllegalStateException("upload failed"), submitted = false))
         assertEquals(QueuedPrompt.HOLD_NOT_SENT, OwnerRefusal.holdFor(refusal(OwnerRefusal.UNCONFIRMED), submitted = false))
+        assertEquals(QueuedPrompt.HOLD_NOT_SENT, OwnerRefusal.holdFor(GatewayNotSentException("no socket"), submitted = true))
     }
 
-    private val empty = ChatComposerStore.State()
-
-    @Test fun aRefusedSendIsKeptInItsChatWhateverTheRefusal() {
-        for (hold in QueuedPrompt.HOLDS) {
-            // Composer free, nothing queued: back in the composer (busy waits in the queue, retried by itself).
-            val kept = OwnerRefusal.keep(empty, "r", "run checks first", emptyList(), hold, edit = false)
-            if (hold == QueuedPrompt.HOLD_BUSY) {
-                assertEquals(listOf("run checks first"), kept.queue.map { it.text })
-                assertEquals(QueuedPrompt.HOLD_BUSY, kept.queue.single().hold)
-            } else {
-                assertEquals("run checks first", kept.draft)
-                assertTrue(kept.queue.isEmpty())
-            }
-            // Something typed: never dropped, at the head of the queue with its hold.
-            val typed = OwnerRefusal.keep(empty.copy(draft = "half a thought"), "r", "run checks first", emptyList(), hold, edit = false)
-            assertEquals("half a thought", typed.draft)
-            assertEquals(QueuedPrompt("r", "run checks first", hold = hold, createdAt = typed.queue.single().createdAt), typed.queue.single())
-        }
-    }
-
-    @Test fun aRefusedSendStaysAheadOfWhatWasQueuedAfterIt() {
-        val later = QueuedPrompt("2", "deploy now")
-        val kept = OwnerRefusal.keep(empty.copy(queue = listOf(later)), "1", "run checks first", emptyList(),
-            QueuedPrompt.HOLD_UNCONFIRMED, edit = false)
-        // Not the composer (the queue would overtake it): the head of the queue, and it fences what follows.
-        assertEquals("", kept.draft)
-        assertEquals(listOf("run checks first", "deploy now"), kept.queue.map { it.text })
-        assertNull(OwnerRefusal.nextToSend(kept.queue))
-    }
-
-    @Test fun aRefusedEditIsKeptAndNeverSentByItself() {
-        // Composer free: back in it, as before.
-        assertEquals("fixed wording", OwnerRefusal.keep(empty, "e", "fixed wording", emptyList(), QueuedPrompt.HOLD_NOT_SENT, edit = true).draft)
-        // Composer busy: was dropped; now held in the queue, never re-sent by itself (it would not rewind), even if busy.
-        for (hold in listOf(QueuedPrompt.HOLD_NOT_SENT, QueuedPrompt.HOLD_BUSY)) {
-            val kept = OwnerRefusal.keep(empty.copy(draft = "x"), "e", "fixed wording", emptyList(), hold, edit = true)
-            assertEquals(QueuedPrompt.HOLD_EDIT, kept.queue.single().hold)
-            assertNull(OwnerRefusal.nextToSend(kept.queue))
-        }
-        // An edit that may have been applied says so.
-        assertEquals(QueuedPrompt.HOLD_UNCONFIRMED,
-            OwnerRefusal.keep(empty.copy(draft = "x"), "e", "w", emptyList(), QueuedPrompt.HOLD_UNCONFIRMED, edit = true).queue.single().hold)
-    }
-
-    @Test fun aHeldHeadFencesDrainAndHandoffUntilYouResolveIt() {
-        val checks = QueuedPrompt("1", "run checks first", hold = QueuedPrompt.HOLD_UNCONFIRMED)
-        val deploy = QueuedPrompt("2", "deploy now")
-        val busy = QueuedPrompt("3", "and tell me", hold = QueuedPrompt.HOLD_BUSY)
-        val queue = listOf(checks, deploy, busy)
-        // Drain (turn end, busy retry) sends nothing past it.
-        assertNull(OwnerRefusal.nextToSend(queue))
-        // Leaving the chat hands nothing past it to the gateway; all of it stays, in order.
-        assertEquals(emptyList<QueuedPrompt>() to queue, OwnerRefusal.handOffPlan(queue))
-        // What was queued before it still goes, in order; it and what follows stay.
-        val first = QueuedPrompt("0", "status?")
-        assertEquals(listOf(first) to queue, OwnerRefusal.handOffPlan(listOf(first) + queue))
-        assertEquals(first, OwnerRefusal.nextToSend(listOf(first) + queue))
-        // Each held kind fences; busy alone does not (it is the one that goes again).
-        for (hold in listOf(QueuedPrompt.HOLD_UNCONFIRMED, QueuedPrompt.HOLD_NOT_SENT, QueuedPrompt.HOLD_EDIT)) {
-            assertNull(OwnerRefusal.nextToSend(listOf(checks.copy(hold = hold), deploy)))
-        }
-        assertEquals(busy, OwnerRefusal.nextToSend(listOf(busy, deploy)))
-        // Removed: what waited goes, in order.
-        assertEquals(deploy, OwnerRefusal.nextToSend(queue - checks))
-        // Edited and saved (the hold released): it goes first, then what waited.
-        assertEquals("1", OwnerRefusal.nextToSend(listOf(checks.copy(hold = null), deploy, busy))?.id)
-    }
-
-    @Test fun aRefusedHandoffGoesBackInOrderWithItsHead() {
-        val a = QueuedPrompt("a", "one")
-        val b = QueuedPrompt("b", "two")
-        // Refused as not owned at "one": both back, "one" held, "two" behind it, neither sent by itself.
-        val back = OwnerRefusal.afterHandOffFailure(listOf(a, b), refusal("SESSION_NOT_OWNED"), submitted = true)
-        assertEquals(listOf("a", "b"), back.map { it.id })
-        assertEquals(QueuedPrompt.HOLD_NOT_SENT, back.first().hold)
-        assertNull(back[1].hold)
-        assertNull(OwnerRefusal.nextToSend(back))
-        // Busy: back, retried by itself, in order.
-        val busy = OwnerRefusal.afterHandOffFailure(listOf(a, b), refusal(OwnerRefusal.BUSY), submitted = true)
-        assertEquals("a", OwnerRefusal.nextToSend(busy)?.id)
-        // The connection dropped mid-send: may be on the gateway.
-        assertEquals(QueuedPrompt.HOLD_UNCONFIRMED,
-            OwnerRefusal.afterHandOffFailure(listOf(a), IllegalStateException("WebSocket closed"), submitted = true).single().hold)
-    }
-
-    @Test fun aMessageThatMayAlreadyBeQueuedIsNeverSentByItself() {
-        val held = QueuedPrompt("1", "deploy it", hold = QueuedPrompt.HOLD_UNCONFIRMED)
-        val busy = QueuedPrompt("2", "and then this", hold = QueuedPrompt.HOLD_BUSY)
-        val plain = QueuedPrompt("3", "later")
-        // Shomer t_8d113995: nothing behind it overtakes it either.
-        assertNull(OwnerRefusal.nextToSend(listOf(held, busy, plain)))
-        assertNull(OwnerRefusal.nextToSend(listOf(held, plain)))
-        assertNull(OwnerRefusal.nextToSend(listOf(held)))
-        assertNull(OwnerRefusal.nextToSend(emptyList()))
-        assertEquals(busy, OwnerRefusal.nextToSend(listOf(busy, held, plain)))
+    @Test fun whatWaitsForYou() {
+        assertTrue(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a", hold = QueuedPrompt.HOLD_UNCONFIRMED)))
+        assertTrue(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a", hold = QueuedPrompt.HOLD_NOT_SENT)))
+        assertTrue(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a", hold = QueuedPrompt.HOLD_EDIT)))
+        assertFalse(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a", hold = QueuedPrompt.HOLD_BUSY)))
+        assertFalse(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a", hold = QueuedPrompt.HOLD_SENDING)))
+        assertFalse(OwnerRefusal.waitsForYou(QueuedPrompt("1", "a")))
     }
 
     @Test fun theLineOverTheComposer() {
@@ -170,29 +82,50 @@ class OwnerRefusalTest {
         error("unbalanced $signature")
     }
 
-    @Test fun theViewModelRoutesEveryRefusalThroughOneRuleAndNeverResendsAHeldOne() {
-        val submit = body("private fun submitPromptNow(")
-        assertTrue(submit.contains("OwnerRefusal.holdFor(t, submitted)"))
-        assertTrue(submit.contains("OwnerRefusal.keep("))
-        assertTrue(submit.contains("keepRefused(composer, chat.storedSessionId)"))
-        assertTrue(submit.contains("retryHeldSoon(it.runtimeSessionId)"))
-        // Kept whether or not the chat is still open: the keep is outside the "still on screen" branch.
-        assertFalse(Regex("""else if \(rewind == null\)""").containsMatchIn(submit))
-        val drain = body("private fun drainQueuedPrompt(")
-        assertTrue(drain.contains("OwnerRefusal.nextToSend(uiState.queuedPrompts)"))
-        assertTrue(drain.contains("composerKeeper.isLoaded(current.storedSessionId)"))
+    @Test fun everySendPathOfTheViewModelGoesThroughTheOneOutbox() {
+        // One prompt.submit call in the whole ViewModel, inside the outbox delivery, right after the disk says submitted.
+        assertEquals(1, Regex("""repo\.submitPrompt\(""").findAll(vm).count())
+        val deliver = vm.substringAfter("private suspend fun deliverEntry(").substringBefore("\n    private ")
+        assertTrue(deliver.contains("outbox.deliver("))
+        assertTrue(Regex("""submitting\(\)\s+repo\.submitPrompt\(""").containsMatchIn(deliver))
+        // Only claimed entries are delivered: the screen's send and the handoff both claim first.
+        val send = body("private fun sendEntry(")
+        assertTrue(send.contains("outbox.claim(entry.id) }"))
+        assertTrue(send.contains("getOrNull() ?: return"))
+        assertTrue(send.contains("launch(start = CoroutineStart.ATOMIC)"))
+        assertTrue(send.contains("deliverEntry("))
         val handoff = body("private fun handOffQueue()")
-        assertTrue(handoff.contains("OwnerRefusal.handOffPlan(uiState.queuedPrompts)"))
-        assertTrue(handoff.contains("OwnerRefusal.afterHandOffFailure("))
-        assertTrue(handoff.contains("keepRefused(composer, chat.storedSessionId)"))
-        assertTrue(body("private fun loadChatEnhancements(").contains("composerKeeper.load(key, chat.storedSessionId)"))
-        assertTrue(body("private suspend fun keepRefused(").contains("composerKeeper.keep("))
+        assertTrue(handoff.contains("outbox.handOffPlan(key)"))
+        assertTrue(handoff.contains("outbox.claim(id) }.getOrNull() ?: break"))
+        assertTrue(handoff.contains("deliverEntry("))
+        // Every way a message is sent writes it to the outbox first.
+        assertTrue(body("private fun enqueueSend(").contains("outbox.enqueue("))
+        for (path in listOf("private fun sendMessage(text: String, deepConfirmed: Boolean)", "private fun postChatVoice(",
+            "private fun runSlashCommand(", "private suspend fun applySlashResult(", "private fun submitVoiceTurn(")) {
+            assertTrue("$path does not enqueue", body(path).contains("enqueueSend("))
+        }
+        // The composer is cleared only after the outbox has it (both the edit and the plain send).
+        val composerSend = body("private fun sendMessage(text: String, deepConfirmed: Boolean)")
+        assertFalse(composerSend.substringBefore("enqueueSend(edited, prompt, attachments").contains("chatDraft = \"\""))
+        assertFalse(composerSend.substringAfter("runSlashCommand(chat, prompt)").substringBefore("enqueueSend(chat, prompt, attachments)")
+            .contains("chatDraft"))
+        assertTrue(composerSend.substringAfter("enqueueSend(chat, prompt, attachments) ?: return").contains("chatDraft = \"\""))
+        // Drain and busy retry take only the outbox head.
+        assertTrue(body("private fun drainQueuedPrompt(").contains("outbox.next(composerKey(current), idle = !current.running)"))
         val retry = body("private fun retryHeldSoon(")
         assertTrue(retry.contains("OwnerRefusal.RETRY_MS"))
         assertTrue(retry.contains("chat.storedSessionId != stored"))
         assertTrue(retry.contains("appForeground"))
-        assertTrue(body("fun removeQueuedPrompt(").contains("drainIdleChatSoon()"))
-        assertTrue(body("fun updateQueuedPrompt(").contains("OwnerRefusal.fences(it)"))
+        // The composer never writes the queue; its saves need the chat's own load token (Shomer t_478c28f5, Medium 1).
+        assertFalse(vm.contains("uiState.queuedPrompts +"))
+        assertTrue(body("private fun persistComposerSoon(").contains("composerKeeper.token(key) ?: return"))
+        assertTrue(body("private fun persistCurrentComposerNow()").contains("composerKeeper.persistNow(key, composerKeeper.token(key)"))
+        assertTrue(body("fun closeActiveChat()").contains("composerKeeper.beginLoad()"))
+        // The lane is the outbox's, refreshed on every change of the open chat.
+        assertTrue(body("private fun reconcileChatChange()").contains("refreshOutboxView()"))
+        assertTrue(body("private fun refreshOutboxView()").contains("outbox::view"))
+        assertTrue(body("fun removeQueuedPrompt(").contains("outbox.discard(id)"))
+        assertTrue(body("fun retryQueuedPrompt(").contains("outbox.retry(id)"))
     }
 
     @Test fun gatewayApprovalsAreAskedForAndAnsweredThroughThePlugin() {

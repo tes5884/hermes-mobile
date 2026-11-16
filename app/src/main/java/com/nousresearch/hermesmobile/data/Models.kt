@@ -421,7 +421,9 @@ data class ChatMessage(
     /** The `@file:`/`@image:` lines lifted out of a stored user turn into [attachments]. */
     val refs: List<String> = emptyList(),
     /** The result inside a background-process or delegation notice, shown when the notice is opened. */
-    val report: String = ""
+    val report: String = "",
+    /** A live bubble of a message still in the outbox (sent from this screen): its entry id. */
+    val outboxId: String? = null
 ) {
     /** The turn as the composer sent it, attachment lines included, for editing it again. */
     val editText: String
@@ -526,7 +528,9 @@ data class SessionMessagePage(
 
 data class PromptSubmitResult(
     val status: String = "",
-    val userRowId: Long? = null
+    val userRowId: Long? = null,
+    /** The owner gateway's receipt for a prompt it queued (forwarded sends). */
+    val admissionId: String? = null
 )
 
 enum class SessionSourceKind { HERMES_APP, CHANNEL, CLIENT, UNKNOWN }
@@ -1005,6 +1009,8 @@ data class QueuedPrompt(
         const val HOLD_NOT_SENT = "not_sent"
         /** An edit that was not applied: never sent again by itself; what is queued after it waits. */
         const val HOLD_EDIT = "edit"
+        /** Going out now (the outbox has it claimed): no actions until the gateway answers. */
+        const val HOLD_SENDING = "sending"
         val HOLDS = setOf(HOLD_BUSY, HOLD_UNCONFIRMED, HOLD_NOT_SENT, HOLD_EDIT)
     }
 }
