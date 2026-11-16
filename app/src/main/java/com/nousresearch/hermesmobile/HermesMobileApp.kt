@@ -580,9 +580,27 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
             )
         }
     ) {
+    // A live voice call covers its bot's chat; the chat stays open (and counts as on screen) underneath.
+    val callUi = s.voiceCall
     // Bot details (P4) covers the bot's chat while it is open; the chat stays open underneath.
     val detailsProfile = s.botDetails?.let { d -> chat?.let { c -> botChatProfile(c, s.profiles) }?.takeIf { it.name == d.profile } }
-    if (detailsProfile != null && chat != null && s.botDetails != null) {
+    if (callUi != null && chat != null) {
+        val callProfile = s.profiles.firstOrNull { it.name == callUi.profile }
+        com.nousresearch.hermesmobile.ui.screens.VoiceCallScreen(
+            call = callUi,
+            profile = callProfile,
+            avatar = vm.avatarAssets[callUi.profile],
+            messages = chat.messages,
+            streamingText = vm.streamingText,
+            approvals = s.approvalCards,
+            actions = com.nousresearch.hermesmobile.ui.screens.VoiceCallActions(
+                onMute = vm::setCallMuted,
+                onRoute = vm::selectCallRoute,
+                onHangUp = vm::hangUpCall,
+                onApproval = vm::answerInlineApproval
+            )
+        )
+    } else if (detailsProfile != null && chat != null && s.botDetails != null) {
         val context = androidx.compose.ui.platform.LocalContext.current
         val connection = s.activeConnectionId.orEmpty()
         var quiet by remember(connection, detailsProfile.name) {
@@ -698,6 +716,7 @@ private fun ChatContent(vm: HermesViewModel, s: HermesUiState, onMenu: () -> Uni
         onBotDetails = vm::openBotDetails,
         approvalCards = s.approvalCards,
         onApproval = vm::answerInlineApproval,
+        onCall = vm::startCall,
         routines = com.nousresearch.hermesmobile.ui.screens.RoutineActions(
             jobs = s.cronJobs,
             runs = s.cronRuns,

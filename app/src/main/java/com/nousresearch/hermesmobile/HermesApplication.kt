@@ -58,7 +58,7 @@ class HermesApplication : Application(), ViewModelStoreOwner {
         runCatching { com.nousresearch.hermesmobile.push.FirebaseRuntime.ensureInitialized(this) }
         com.nousresearch.hermesmobile.update.AppUpdates.schedule(this)
         // Capture leftovers before any screen can start a new recording. Never touch arbitrary cache files.
-        val oldAudio = cacheDir.listFiles()?.filter { it.name.startsWith("hermes-voice-") || it.name.startsWith("hermes-speech-") }.orEmpty()
+        val oldAudio = cacheDir.listFiles()?.filter { it.name.startsWith("hermes-voice-") || it.name.startsWith("hermes-speech-") || it.name.startsWith("hermes-call-") }.orEmpty()
         Thread({
             oldAudio.forEach { it.delete() }
             // Snapshot old imports only; new imports and all persisted drafts/queues are protected.

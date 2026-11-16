@@ -38,7 +38,9 @@ internal class BotChatHeader(
     val dot: SessionDot,
     val onDetails: () -> Unit,
     val approvals: List<ApprovalCards.Card> = emptyList(),
-    val onApproval: (requestId: String, choice: String) -> Unit = { _, _ -> }
+    val onApproval: (requestId: String, choice: String) -> Unit = { _, _ -> },
+    /** The call button (live voice call with this bot); null hides it. */
+    val onCall: (() -> Unit)? = null
 )
 
 @Composable
@@ -115,7 +117,9 @@ fun ChatScreen(
     onBotDetails: (HermesProfile) -> Unit = {},
     /** Inline approval cards of the open bot chat, and the answer to one (request id, once|always|deny). */
     approvalCards: List<ApprovalCards.Card> = emptyList(),
-    onApproval: (String, String) -> Unit = { _, _ -> }
+    onApproval: (String, String) -> Unit = { _, _ -> },
+    /** Starts a live voice call with the open bot chat (header call button). */
+    onCall: (() -> Unit)? = null
 ) {
     var showNew by remember { mutableStateOf(false) }
 
@@ -177,7 +181,7 @@ fun ChatScreen(
         twoPane = twoPane,
         bot = botChatProfile(chat, profiles)?.let { profile ->
             BotChatHeader(profile, botAvatars[profile.name], LiveSessions.dotFor(sessionDots, chat.storedSessionId), { onBotDetails(profile) },
-                approvalCards, onApproval)
+                approvalCards, onApproval, onCall.takeUnless { chat.readOnly })
         }
     )
 

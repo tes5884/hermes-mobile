@@ -105,6 +105,8 @@ data class HermesUiState(
      * chat-change reconcile; it lives only while the Chat page shows that bot's chat ([settleOverlays]).
      */
     val botDetails: com.nousresearch.hermesmobile.data.BotDetailsState? = null,
+    /** A live voice call with the open bot chat (call screen over the chat), or null. */
+    val voiceCall: com.nousresearch.hermesmobile.data.VoiceCallUi? = null,
     val groupActionBusy: Boolean = false,
     val pendingVoice: List<PendingVoiceNote> = emptyList(),
     val sessions: List<HermesSession> = emptyList(),
@@ -437,7 +439,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }
     }
 
-    fun onEnvironmentChanged(foreground: Boolean, online: Boolean, networkChanged: Boolean = false) {
+    fun onEnvironmentChanged(screen: Boolean, online: Boolean, networkChanged: Boolean = false) {
+        // A live call keeps the gateway socket up with the screen off (its microphone service keeps the process alive).
+        screenForeground = screen
+        val foreground = screen || voiceEngine != null
         val becameAvailable = foreground && online && (!appForeground || !networkOnline || networkChanged)
         appForeground = foreground
         networkOnline = online
@@ -3560,7 +3565,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         attachments: List<ComposerAttachment>,
         rewind: EditingTurn? = null,
         confirmDeep: Boolean = false,
-        fromQueue: Boolean = false
+        fromQueue: Boolean = false,
+        voiceTurn: Boolean = false,
+        interrupted: Boolean = false
     ) {
         if (readOnlyActiveChat()) return
         val repo = repository ?: return
@@ -3617,7 +3624,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }))
                 }
                 retryWhileSessionBusy(enabled = fromQueue) {
-                    repo.submitPrompt(chat.runtimeSessionId, chat.profile, wire, rewind, confirmDeep, queued = fromQueue)
+                    repo.submitPrompt(chat.runtimeSessionId, chat.profile, wire, rewind, confirmDeep, queued = fromQueue,
+                        voiceTurn = voiceTurn, interrupted = interrupted)
                 }
             }.onSuccess { result ->
                 // A steer joins a turn already running instead of starting one: it waits for no answer of its own.
@@ -3648,6 +3656,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 )
             }.onFailure { t ->
                 com.nousresearch.hermesmobile.push.PushDelivery.releaseTurn(getApplication(), chat.storedSessionId)
+                // A call waiting for this turn's reply goes back to listening (the failure shows in the chat).
+                if (voiceTurn) voiceEngine?.loop?.onTurnEnded()
                 val current = uiState.activeChat
                 if (current?.runtimeSessionId == chat.runtimeSessionId) {
                     val canRestore = uiState.chatDraft.isBlank() && uiState.composerAttachments.isEmpty()
@@ -3926,6 +3936,95 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         val session = uiState.sessions.firstOrNull { it.id == chat.storedSessionId && it.profile == chat.profile }
             ?: HermesSession(id = chat.storedSessionId, profile = chat.profile, title = chat.title, source = chat.source)
         branchSession(session)
+    }
+
+    // ------------------------------------------------------------------ live voice call (chained loop + barge-in)
+
+    private var voiceEngine: com.nousresearch.hermesmobile.features.VoiceCallEngine? = null
+    private var voiceBinding: com.nousresearch.hermesmobile.data.VoiceCallBinding? = null
+    private var screenForeground = false
+
+    /** True while a call runs: the gateway socket must stay up with the screen off. */
+    val voiceCallActive: Boolean get() = voiceEngine != null
+
+    /**
+     * The call button on a bot chat's header: a live voice conversation with that bot in its own Bot Chat. The call
+     * is bound to this chat: any navigation away, push tap, other chat or connection end hangs it up (in the one
+     * chat-change reconcile). The words go into the chat as normal turns, so the conversation stays there after.
+     */
+    fun startCall() {
+        if (voiceEngine != null || readOnlyActiveChat()) return
+        val repo = repository ?: return
+        val chat = uiState.activeChat ?: return
+        val bot = com.nousresearch.hermesmobile.ui.screens.botChatProfile(chat, uiState.profiles) ?: return
+        val connection = uiState.activeConnectionId ?: return
+        val app = getApplication<Application>()
+        val binding = com.nousresearch.hermesmobile.data.VoiceCallBinding(connectionEpoch, connection, chat.profile,
+            chat.storedSessionId, chat.runtimeSessionId)
+        val engine = com.nousresearch.hermesmobile.features.VoiceCallEngine(app, viewModelScope, repo.rest, chat.profile, bot.label,
+            object : com.nousresearch.hermesmobile.features.VoiceCallEngine.Host {
+                override fun submitVoiceTurn(text: String, interrupted: Boolean) = submitVoiceTurn(binding, text, interrupted)
+                override fun interruptVoiceTurn() { if (voiceBinding == binding) stopTurn() }
+                override fun voiceCallChanged(ui: com.nousresearch.hermesmobile.data.VoiceCallUi) {
+                    if (voiceBinding == binding) uiState = uiState.copy(voiceCall = ui)
+                }
+                override fun voiceCallEnded(reason: com.nousresearch.hermesmobile.data.VoiceCallLoop.EndReason) = voiceCallEnded(binding, reason)
+            })
+        // The microphone service first (the app is in front now, as Android requires), then the audio.
+        com.nousresearch.hermesmobile.features.VoiceCallService.start(app, bot.label, connection, chat.profile)
+        voiceEngine = engine
+        voiceBinding = binding
+        if (!engine.start(turnRunning = chat.running)) {
+            voiceEngine = null
+            voiceBinding = null
+            com.nousresearch.hermesmobile.features.VoiceCallService.stop(app)
+            uiState = uiState.copy(snackbar = string(R.string.call_audio_busy))
+            return
+        }
+        com.nousresearch.hermesmobile.push.AppPresence.callSessions = setOf(chat.storedSessionId, chat.runtimeSessionId)
+        onEnvironmentChanged(screenForeground, networkOnline)
+        // An approval already waiting in this chat is pointed out at once.
+        if (uiState.approvalCards.any { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }) {
+            engine.loop.onApprovalWaiting(bot.label)
+        }
+    }
+
+    fun hangUpCall() { voiceEngine?.hangUp() }
+    fun setCallMuted(muted: Boolean) { voiceEngine?.setMuted(muted) }
+    fun selectCallRoute(kind: com.nousresearch.hermesmobile.data.CallRouteKind) { voiceEngine?.selectRoute(kind) }
+
+    /** A spoken turn: straight to the gateway as the user's message in the bound chat (never the local queue). */
+    private fun submitVoiceTurn(binding: com.nousresearch.hermesmobile.data.VoiceCallBinding, text: String, interrupted: Boolean) {
+        if (voiceBinding != binding) return
+        val chat = uiState.activeChat?.takeIf {
+            it.storedSessionId == binding.storedSessionId || it.runtimeSessionId == binding.runtimeSessionId
+        } ?: run { voiceEngine?.chatClosed(); return }
+        submitPromptNow(chat, text, emptyList(), voiceTurn = true, interrupted = interrupted)
+    }
+
+    private fun voiceCallEnded(binding: com.nousresearch.hermesmobile.data.VoiceCallBinding, reason: com.nousresearch.hermesmobile.data.VoiceCallLoop.EndReason) {
+        if (voiceBinding != binding) return
+        voiceEngine = null
+        voiceBinding = null
+        com.nousresearch.hermesmobile.push.AppPresence.callSessions = emptySet()
+        com.nousresearch.hermesmobile.features.VoiceCallService.stop(getApplication())
+        val notice = when (reason) {
+            com.nousresearch.hermesmobile.data.VoiceCallLoop.EndReason.AUDIO_LOST -> string(R.string.call_audio_lost)
+            com.nousresearch.hermesmobile.data.VoiceCallLoop.EndReason.FAILED -> string(R.string.call_failed)
+            else -> null
+        }
+        uiState = uiState.copy(voiceCall = null, snackbar = notice ?: uiState.snackbar)
+        onEnvironmentChanged(screenForeground, networkOnline)
+    }
+
+    /** The turn events of the bound chat, fed to the call (payload already matched to the active chat). */
+    private fun callTurn(event: String, text: String = "") {
+        val loop = voiceEngine?.loop ?: return
+        when (event) {
+            "start" -> loop.onTurnStarted()
+            "delta" -> loop.onTurnDelta(text)
+            "end" -> loop.onTurnEnded()
+        }
     }
 
     fun stopTurn() {
@@ -4420,7 +4519,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun showInlineApproval(request: ServerInteraction) {
         completeInteraction(request.requestId) // never both a card and a dialog for one request
         val card = com.nousresearch.hermesmobile.data.ApprovalCards.fromRequest(request.requestId, request.params, System.currentTimeMillis())
+        val known = uiState.approvalCards.any { it.requestId == card.requestId }
         uiState = uiState.copy(approvalCards = com.nousresearch.hermesmobile.data.ApprovalCards.upsert(uiState.approvalCards, card))
+        // On a call the card is on the call screen too; the voice points at it (approve by tap only, never by voice).
+        if (!known && card.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING) {
+            voiceEngine?.let { engine -> uiState.voiceCall?.label?.let { engine.loop.onApprovalWaiting(it) } }
+        }
     }
 
     /**
@@ -4443,6 +4547,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             chatOpeningJob?.cancel()
             val chat = uiState.activeChat
             val view = chatViewOf(uiState, connectionEpoch)
+            // A live call belongs to one bot chat: once that chat is not what is on screen, the call hangs up here.
+            voiceBinding?.let { if (!it.stillOn(view)) voiceEngine?.chatClosed() }
             val moves = chatChange.reconcile(view, navigationGeneration, listOfNotNull(uiState.interaction) + uiState.interactionQueue)
             val surface = view.surface
             val pending = approvalRouter.pendingIds
@@ -4465,6 +4571,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
      */
     private fun navigate(): Long {
         val generation = ++navigationGeneration
+        // A navigation leaves the chat a live call is bound to: hang up now, not once the new screen lands.
+        voiceEngine?.chatClosed()
         // A navigation from outside the palette (a push tap) must not land hidden behind Search or Bot details.
         if (uiState.searchOpen || uiState.botDetails != null) uiState = uiState.copy(searchOpen = false, botDetails = null)
         reconcileChatChange()
@@ -4633,6 +4741,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 "message.start" -> {
                     val chat = uiState.activeChat ?: return@launch
                     if (payloadSessionMatches(payload, chat)) {
+                        callTurn("start")
                         uiState = uiState.copy(
                             activeChat = chat.copy(running = true),
                             reasoningText = "",
@@ -4674,7 +4783,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             )
                         )
                         // Desktop drains on any busy→idle settle, not only on message.complete.
-                        if (settled) drainQueuedPromptSoon(chat.runtimeSessionId)
+                        if (settled) { drainQueuedPromptSoon(chat.runtimeSessionId); callTurn("end") }
                     }
                 }
                 "session.created", "session.updated", "sessions.changed" -> refreshSessions()
@@ -4694,6 +4803,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         // A delta can be only whitespace (some models stream the space before a word on its own): keep it.
         if (delta.isEmpty()) return
 
+        callTurn("delta", delta)
         streamBuffer.append(delta)
         if (!chat.running) uiState = uiState.copy(activeChat = chat.copy(running = true))
         if (streamFlushJob?.isActive != true) {
@@ -4725,6 +4835,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             .ifBlank { TranscriptText.visible(payload.opt("content")) }
             .ifBlank { streamBuffer.toString() }
             .ifBlank { streamingText }
+        // A reply that came whole (no deltas) is read out from its final text; then the call's turn ends.
+        if (streamBuffer.isEmpty() && completed.isNotBlank()) callTurn("delta", completed)
+        callTurn("end")
 
         // The model pin only fences the model-switch/first-turn race. Once that
         // turn completes, subsequent session.info events are authoritative again
