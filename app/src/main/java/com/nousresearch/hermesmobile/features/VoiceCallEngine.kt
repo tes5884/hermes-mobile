@@ -8,7 +8,6 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
-import android.media.AudioTimestamp
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
@@ -19,11 +18,13 @@ import android.os.Looper
 import android.util.Base64
 import com.nousresearch.hermesmobile.data.BargeDetector
 import com.nousresearch.hermesmobile.data.BargePhase
+import com.nousresearch.hermesmobile.data.CallMic
 import com.nousresearch.hermesmobile.data.CallRouteKind
 import com.nousresearch.hermesmobile.data.CallRoutes
 import com.nousresearch.hermesmobile.data.HermesHttpException
 import com.nousresearch.hermesmobile.data.HermesRestClient
 import com.nousresearch.hermesmobile.data.MicCapture
+import com.nousresearch.hermesmobile.data.MicRecorder
 import com.nousresearch.hermesmobile.data.VoiceCallLoop
 import com.nousresearch.hermesmobile.data.VoiceCallUi
 import kotlinx.coroutines.CoroutineScope
@@ -87,7 +88,6 @@ class VoiceCallEngine(
         if (!requestFocus()) return false
         running = true
         router.start()
-        mic.start()
         tickJob = scope.launch { while (isActive && running) { delay(250); loop.onTick() } }
         scope.launch(Dispatchers.IO) { runCatching { leaseOn("stt", true); leaseOn("tts", true) } }
         loop.start(turnRunning)
@@ -105,7 +105,7 @@ class VoiceCallEngine(
         running = false
         tickJob?.cancel()
         speaker.stop()
-        mic.finish()
+        mic.pause()
         router.end()
         focusRequest?.let { am.abandonAudioFocusRequest(it) }
         scope.launch(NonCancellable + Dispatchers.IO) {
@@ -128,7 +128,7 @@ class VoiceCallEngine(
     private var armToken = 0L
 
     override fun armMic() { armToken++; mic.arm(armToken) }
-    override fun pauseMic() { armToken++; mic.pause(armToken) }
+    override fun pauseMic() { armToken++; mic.pause() }
     override fun stopSpeech() = speaker.stop()
     override fun speak(sentence: String) = speaker.say(sentence)
     override fun interruptTurn() = host.interruptVoiceTurn()
@@ -376,80 +376,64 @@ class VoiceCallEngine(
     private val mic = Mic()
 
     /**
-     * Reads the mic in 30 ms blocks for the whole call and hands each to [MicCapture] (pre-roll, barge detector,
-     * endpointer, WAV): ARMED runs the barge detector (the speaker tells it whether the bot is audible); on a trip it
-     * keeps the 1.2 s pre-roll so the first syllable isn't lost and captures until quiet. PAUSED (mute, transcribing,
-     * on hold) discards, and nothing recorded while paused can reach a later utterance: each block carries when it
-     * was recorded, and pause/arm reset the buffers. Events carry the arm token they started under, so one that was
-     * overtaken by a newer arm/pause on the main thread is dropped.
+     * The microphone is on only while the call listens ([CallMic]): every arm opens a NEW AudioRecord (fresh
+     * pre-roll, barge detector, capture); every pause (mute, hold, transcribing, end) stops it at once and its reader
+     * releases it and drops every buffer, so the system mic indicator goes off and nothing said meanwhile is
+     * recorded. Blocks go through [MicCapture]: the barge detector (the speaker tells it whether the bot is audible),
+     * the 1.2 s pre-roll so the first syllable isn't lost, capture until quiet. Events carry the arm token they
+     * started under, so one overtaken by a newer arm/pause on the main thread is dropped.
      */
     private inner class Mic {
         private val rate = 16_000
         private val block = rate * BargeDetector.BLOCK_MS / 1000
-        private val capture = MicCapture(rate)
-        @Volatile private var alive = false
-        private var thread: Thread? = null
-
-        fun arm(t: Long) = capture.arm(t, System.nanoTime())
-        fun pause(t: Long) = capture.pause(t)
-
-        fun start() {
-            alive = true
-            thread = Thread({ runCatching { read() }.onFailure {
-                android.util.Log.w("HermesCall", "mic failed: ${it.message}")
-                main.post { if (running) loop.fail() }
-            } }, "hermes-call-mic").also { it.start() }
-        }
-
-        fun finish() { alive = false; capture.pause(Long.MIN_VALUE) }
-
-        @android.annotation.SuppressLint("MissingPermission") // the call button asks for RECORD_AUDIO first
-        private fun read() {
-            val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            val bufferBytes = maxOf(min, block * 2 * 8)
-            val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, rate, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, bufferBytes)
-            check(rec.state == AudioRecord.STATE_INITIALIZED) { "microphone unavailable" }
-            val aec = if (AcousticEchoCanceler.isAvailable()) runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
-            val ns = if (NoiseSuppressor.isAvailable()) runCatching { NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
-            try {
-                rec.startRecording()
-                val buf = ShortArray(block)
-                val stamp = AudioTimestamp()
-                val nanosPerSample = 1_000_000_000.0 / rate
-                // No recorder timestamp: assume the block is as old as it could be (a whole buffer behind the read).
-                val worstLagNanos = ((bufferBytes / 2 + block) * nanosPerSample).toLong()
-                val slackNanos = BargeDetector.BLOCK_MS * 1_000_000L
-                var position = 0L
-                while (alive) {
-                    val n = rec.read(buf, 0, block)
-                    val readAt = System.nanoTime()
-                    if (n <= 0) { Thread.sleep(10); continue }
-                    val first = position
-                    position += n
-                    // When the block's first sample was recorded, on arm()'s clock, erring early (so it is dropped
-                    // rather than kept if it might predate an unmute).
-                    val startedAt = if (rec.getTimestamp(stamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS)
-                        stamp.nanoTime + ((first - stamp.framePosition) * nanosPerSample).toLong() - slackNanos
-                    else readAt - worstLagNanos
-                    when (val e = capture.feed(buf.copyOf(n), startedAt, speaker.playing)) {
-                        is MicCapture.Event.SpeechStart -> {
-                            val t = e.token
-                            val barge = e.phase == BargePhase.PLAYBACK
-                            main.post { if (running && t == armToken) loop.onSpeechStart(barge) }
-                        }
-                        is MicCapture.Event.Utterance -> {
-                            val t = e.token
-                            val wav = e.wav
-                            main.post { if (running && t == armToken) loop.onUtterance(wav) }
-                        }
-                        null -> Unit
+        private val calls = CallMic(
+            open = { AndroidRecorder() },
+            blockSamples = block,
+            playing = { speaker.playing },
+            emit = { t, e ->
+                when (e) {
+                    is MicCapture.Event.SpeechStart -> {
+                        val barge = e.phase == BargePhase.PLAYBACK
+                        main.post { if (running && t == armToken) loop.onSpeechStart(barge) }
+                    }
+                    is MicCapture.Event.Utterance -> {
+                        val wav = e.wav
+                        main.post { if (running && t == armToken) loop.onUtterance(wav) }
                     }
                 }
-            } finally {
-                runCatching { rec.stop() }
+            },
+            failed = { t, e ->
+                android.util.Log.w("HermesCall", "mic failed: ${e.message}")
+                main.post { if (running && t == armToken) loop.fail() }
+            },
+            rate = rate
+        )
+
+        fun arm(t: Long) = calls.arm(t)
+        fun pause() = calls.pause()
+
+        /** One AudioRecord (VOICE_COMMUNICATION + echo canceller + noise suppressor) for one listening window. */
+        @android.annotation.SuppressLint("MissingPermission") // the call button asks for RECORD_AUDIO first
+        private inner class AndroidRecorder : MicRecorder {
+            private val rec: AudioRecord
+            private val aec: AcousticEchoCanceler?
+            private val ns: NoiseSuppressor?
+
+            init {
+                val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, rate, AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, maxOf(min, block * 2 * 8))
+                if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); throw IllegalStateException("microphone unavailable") }
+                aec = if (AcousticEchoCanceler.isAvailable()) runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
+                ns = if (NoiseSuppressor.isAvailable()) runCatching { NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
+            }
+
+            override fun start() = rec.startRecording()
+            override fun read(buf: ShortArray): Int = rec.read(buf, 0, buf.size)
+            override fun stop() = rec.stop()
+            override fun release() {
+                runCatching { aec?.release() }; runCatching { ns?.release() }
                 rec.release()
-                aec?.release(); ns?.release()
             }
         }
     }

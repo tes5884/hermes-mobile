@@ -1,40 +1,108 @@
 package com.nousresearch.hermesmobile
 
 import com.nousresearch.hermesmobile.data.BargeDetector
+import com.nousresearch.hermesmobile.data.CallMic
 import com.nousresearch.hermesmobile.data.MicCapture
+import com.nousresearch.hermesmobile.data.MicRecorder
 import com.nousresearch.hermesmobile.data.VoiceCallLoop
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * The call's mic buffer (Shomer t_215dfd5f): audio recorded while muted or on hold never reaches a later
- * utterance's WAV. Real 30 ms frames go through the real loop + MicCapture the way VoiceCallEngine wires them, and
- * the WAV that would be uploaded is decoded and checked sample by sample.
+ * The call's microphone is off while muted, on hold or transcribing (Tzvi, 2026-11-15; Shomer t_215dfd5f /
+ * t_4c4fd4f4): the recorder is stopped and released, every buffer is dropped, and unmute/resume opens a new recorder
+ * with a fresh pre-roll. The real loop + [CallMic] + [MicCapture] run on their real reader threads against a fake
+ * recorder in a [Room]; the WAV that would be uploaded is decoded and checked sample by sample.
  */
 class VoiceCallMicTest {
     private val blockSamples = 16_000 * BargeDetector.BLOCK_MS / 1000
-    private val blockNanos = BargeDetector.BLOCK_MS * 1_000_000L
 
     // Each phase of a test gets its own amplitude, so a decoded WAV shows where every sample came from.
     private val PRE_QUIET = 41; private val PRE_SPEECH = 4111
     private val MUTED_SPEECH = 5111; private val MUTED_QUIET = 51
     private val POST_QUIET = 32; private val POST_SPEECH = 3222
 
-    private fun frame(amp: Int) = ShortArray(blockSamples) { i -> (if (i % 2 == 0) amp else -amp).toShort() }
+    /**
+     * The air around the phone and every recorder the call opened. Speaking puts a frame into each recorder that is
+     * recording, the way a microphone does; a stopped or released one hears nothing. A recorder hands back what it
+     * buffered even after stop() (the worst case), so the call itself must discard it.
+     */
+    private inner class Room(private val tagged: Boolean = false) {
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN") // wait/notifyAll
+        val lock = Object()
+        val recorders = mutableListOf<Fake>() // under lock
+        var spoken = 0L // under lock: index of the next frame said
+        var maxRecordingAtOnce = 0 // under lock
+        /** While true, recorders don't hand out what they hear (it piles up in their buffer). */
+        var stall = false
+            set(v) = synchronized(lock) { field = v; lock.notifyAll() }
+        /** While true, a reader blocked in read() doesn't come back, even once its recorder is stopped. */
+        var hold = false
+            set(v) = synchronized(lock) { field = v; lock.notifyAll() }
 
-    /** VoiceCallEngine's wiring of loop ↔ mic, on a fake clock where every fed frame takes 30 ms. */
+        fun frame(amp: Int, idx: Long) = ShortArray(blockSamples) { i -> (if (i % 2 == 0) amp else -amp).toShort() }.also {
+            if (tagged) { it[0] = (idx % 256).toShort(); it[1] = (idx / 256 % 256).toShort(); it[2] = (idx / 65536 % 256).toShort() }
+        }
+
+        fun say(amp: Int, count: Int) = synchronized(lock) {
+            repeat(count) {
+                val f = frame(amp, spoken++)
+                for (r in recorders) if (r.recording) { r.buf.addLast(f); r.heard += amp }
+            }
+            lock.notifyAll()
+        }
+
+        fun open(token: Long): Fake = synchronized(lock) { Fake(token).also { recorders += it } }
+        fun recordingNow() = synchronized(lock) { recorders.count { it.recording } }
+        fun unreleased() = synchronized(lock) { recorders.count { !it.released } }
+        fun count() = synchronized(lock) { recorders.size }
+        fun heardByAny(amp: Int) = synchronized(lock) { recorders.any { amp in it.heard } }
+
+        inner class Fake(val token: Long) : MicRecorder {
+            var started = false; var stopped = false; var released = false; var waiting = false
+            val buf = ArrayDeque<ShortArray>()
+            val heard = mutableSetOf<Int>()
+            val recording get() = started && !stopped && !released
+
+            override fun start() = synchronized(lock) {
+                check(!released && !stopped)
+                started = true
+                maxRecordingAtOnce = maxOf(maxRecordingAtOnce, recorders.count { it.recording })
+            }
+
+            override fun read(buf: ShortArray): Int = synchronized(lock) {
+                while (hold || ((this.buf.isEmpty() || stall) && recording)) { waiting = true; lock.notifyAll(); lock.wait() }
+                waiting = false
+                val f = this.buf.removeFirstOrNull() ?: return -3 // AudioRecord.ERROR_INVALID_OPERATION once stopped
+                f.copyInto(buf)
+                f.size
+            }
+
+            override fun stop() = synchronized(lock) { stopped = true; lock.notifyAll() }
+            override fun release() = synchronized(lock) { released = true; buf.clear(); lock.notifyAll() }
+        }
+    }
+
+    /** VoiceCallEngine's wiring of loop ↔ mic, with the main thread played by the test thread. */
     private inner class Rig : VoiceCallLoop.Effects {
-        val mic = MicCapture()
-        var clock = 1_000_000_000L
+        val room = Room()
+        var clockMs = 1_000L
         var armToken = 0L
+        var armed = false
         val uploads = mutableListOf<ByteArray>()
-        val loop = VoiceCallLoop(this) { clock / 1_000_000 }
+        val events = ConcurrentLinkedQueue<Pair<Long, MicCapture.Event>>()
+        val allEvents = ConcurrentLinkedQueue<Long>() // the token of every event the mic emitted, dropped or not
+        val failures = ConcurrentLinkedQueue<Throwable>()
+        val mic = CallMic(
+            open = { room.open(it) }, blockSamples = blockSamples, playing = { false },
+            emit = { t, e -> allEvents += t; events += t to e }, failed = { _, e -> failures += e })
+        val loop = VoiceCallLoop(this) { clockMs }
 
-        override fun armMic() { armToken++; mic.arm(armToken, clock) }
-        override fun pauseMic() { armToken++; mic.pause(armToken) }
+        override fun armMic() { armToken++; armed = true; mic.arm(armToken) }
+        override fun pauseMic() { armToken++; armed = false; mic.pause() }
         override fun stopSpeech() {}
         override fun speak(sentence: String) {}
         override fun interruptTurn() {}
@@ -44,20 +112,40 @@ class VoiceCallMicTest {
         override fun notice(notice: VoiceCallLoop.Notice) {}
         override fun ended(reason: VoiceCallLoop.EndReason) {}
 
-        /** [count] frames recorded now (or [recordedAt], for a block still in the recorder's buffer) and read. */
-        fun feed(amp: Int, count: Int, recordedAt: (Int) -> Long = { clock }) {
-            repeat(count) { i ->
-                when (val e = mic.feed(frame(amp), recordedAt(i), playing = false)) {
-                    is MicCapture.Event.SpeechStart -> if (e.token == armToken) loop.onSpeechStart(false)
-                    is MicCapture.Event.Utterance -> if (e.token == armToken) loop.onUtterance(e.wav)
-                    null -> Unit
+        /** Wait until the mic is idle (every closed window's recorder released, the open one drained), then hand
+         *  its events to the loop the way the main thread would; repeat while that changes anything. */
+        fun settle() {
+            while (true) {
+                val deadline = System.currentTimeMillis() + 5_000
+                while (!idle()) {
+                    check(System.currentTimeMillis() < deadline) { "the mic didn't settle" }
+                    Thread.sleep(1)
                 }
-                clock += blockNanos
+                val (t, e) = events.poll() ?: break
+                if (t != armToken) continue
+                when (e) {
+                    is MicCapture.Event.SpeechStart -> loop.onSpeechStart(false)
+                    is MicCapture.Event.Utterance -> loop.onUtterance(e.wav)
+                }
             }
+            assertTrue(failures.isEmpty())
         }
 
+        private fun idle() = synchronized(room.lock) {
+            room.recorders.all { it.released || (armed && it.token == armToken && it.started && it.waiting && it.buf.isEmpty()) } &&
+                (!armed || room.recorders.any { it.token == armToken && it.started })
+        }
+
+        fun say(amp: Int, count: Int) { room.say(amp, count); clockMs += count * BargeDetector.BLOCK_MS.toLong(); settle() }
+
         /** The user says something: room calibration, speech, then the quiet that ends the utterance. */
-        fun utterance(quiet: Int, speech: Int) { feed(quiet, 20); feed(speech, 15); feed(quiet, 45) }
+        fun utterance(quiet: Int, speech: Int) { say(quiet, 20); say(speech, 15); say(quiet, 45) }
+
+        /** The microphone is off: nothing recording, every recorder released. */
+        fun assertMicOff() {
+            assertEquals("a recorder is recording", 0, room.recordingNow())
+            assertEquals("a recorder isn't released", 0, room.unreleased())
+        }
     }
 
     /** Distinct |sample| values in a 16-bit mono WAV, after checking its header. */
@@ -71,44 +159,70 @@ class VoiceCallMicTest {
         }.toSet()
     }
 
-    @Test fun speechWhileMutedIsNotInTheFirstUtteranceAfterUnmute() {
+    @Test fun mutedTheMicIsReleasedAndUnmuteOpensANewOneWithOnlyPostUnmuteAudio() {
         val rig = Rig()
         rig.loop.start(turnAlreadyRunning = false)
-        rig.feed(PRE_QUIET, 20)
+        rig.settle()
+        assertEquals(1, rig.room.recordingNow())
+        rig.say(PRE_QUIET, 20)
         rig.loop.setMuted(true)
-        rig.feed(MUTED_SPEECH, 30) // private words, said while muted
-        rig.feed(MUTED_QUIET, 10)
+        assertEquals("stopped at once on mute", 0, rig.room.recordingNow())
+        rig.settle()
+        rig.assertMicOff()
+        rig.say(MUTED_SPEECH, 30) // private words, said while muted
+        rig.say(MUTED_QUIET, 10)
+        rig.assertMicOff()
+        assertFalse("a recorder heard the muted speech", rig.room.heardByAny(MUTED_SPEECH))
+        val before = rig.room.count()
         rig.loop.setMuted(false)
+        rig.settle()
+        assertEquals("unmute opens a new recorder", before + 1, rig.room.count())
+        assertEquals(1, rig.room.recordingNow())
         rig.utterance(POST_QUIET, POST_SPEECH) // starts well within the 1.2 s pre-roll of the muted words
         assertEquals(1, rig.uploads.size)
-        val amps = amplitudes(rig.uploads.single())
-        assertTrue(POST_SPEECH in amps)
-        assertEquals(setOf(POST_QUIET, POST_SPEECH), amps)
+        assertEquals(setOf(POST_QUIET, POST_SPEECH), amplitudes(rig.uploads.single()))
+        assertEquals(1, rig.room.maxRecordingAtOnce)
     }
 
-    @Test fun speechDuringATransientFocusHoldIsNotInTheFirstUtteranceAfterResume() {
+    @Test fun onHoldTheMicIsReleasedAndResumeOpensANewOneWithOnlyPostResumeAudio() {
         val rig = Rig()
         rig.loop.start(turnAlreadyRunning = false)
-        rig.feed(PRE_QUIET, 20)
+        rig.settle()
+        rig.say(PRE_QUIET, 20)
         rig.loop.onAudioFocusLost(permanent = false) // a phone call rings: hold
         assertEquals(VoiceCallLoop.Phase.HOLD, rig.loop.phase)
-        rig.feed(MUTED_SPEECH, 30) // talking on the phone call
-        rig.feed(MUTED_QUIET, 10)
+        assertEquals("stopped at once on hold", 0, rig.room.recordingNow())
+        rig.settle()
+        rig.assertMicOff()
+        rig.say(MUTED_SPEECH, 30) // talking on the phone call
+        rig.say(MUTED_QUIET, 10)
+        rig.assertMicOff()
+        assertFalse(rig.room.heardByAny(MUTED_SPEECH))
+        val before = rig.room.count()
         rig.loop.onAudioFocusGained()
+        rig.settle()
+        assertEquals(before + 1, rig.room.count())
         rig.utterance(POST_QUIET, POST_SPEECH)
         assertEquals(1, rig.uploads.size)
         assertEquals(setOf(POST_QUIET, POST_SPEECH), amplitudes(rig.uploads.single()))
     }
 
-    @Test fun blocksRecordedBeforeUnmuteButReadAfterAreDropped() {
+    @Test fun whatTheRecorderStillHeldAtMuteIsDroppedNeverFed() {
         val rig = Rig()
         rig.loop.start(turnAlreadyRunning = false)
+        rig.settle()
+        val first = rig.armToken
+        // The reader falls behind: 1.05 s of audio, speech included, sits unread in the recorder when the user mutes.
+        rig.room.stall = true
+        rig.room.say(PRE_QUIET, 20)
+        rig.room.say(PRE_SPEECH, 15)
         rig.loop.setMuted(true)
-        rig.feed(MUTED_QUIET, 10)
+        rig.room.stall = false // the stopped recorder now hands all of it back
+        rig.settle()
+        rig.assertMicOff()
+        assertFalse("a block read after the mute reached the detector", rig.allEvents.contains(first))
         rig.loop.setMuted(false)
-        val unmutedAt = rig.clock
-        // The recorder's buffer still holds 240 ms recorded while muted; the mic thread reads it after the unmute.
-        rig.feed(MUTED_SPEECH, 8) { i -> unmutedAt - (8 - i) * blockNanos }
+        rig.settle()
         rig.utterance(POST_QUIET, POST_SPEECH)
         assertEquals(1, rig.uploads.size)
         assertEquals(setOf(POST_QUIET, POST_SPEECH), amplitudes(rig.uploads.single()))
@@ -117,62 +231,94 @@ class VoiceCallMicTest {
     @Test fun muteMidUtteranceDropsTheCaptureAndNothingCarriesOver() {
         val rig = Rig()
         rig.loop.start(turnAlreadyRunning = false)
-        rig.feed(PRE_QUIET, 20)
-        rig.feed(PRE_SPEECH, 15)
+        rig.settle()
+        rig.say(PRE_QUIET, 20)
+        rig.say(PRE_SPEECH, 15)
         assertEquals(VoiceCallLoop.Phase.CAPTURING, rig.loop.phase)
         rig.loop.setMuted(true)
-        rig.feed(MUTED_SPEECH, 20)
-        rig.feed(MUTED_QUIET, 45)
+        rig.settle()
+        rig.assertMicOff()
+        rig.say(MUTED_SPEECH, 20)
+        rig.say(MUTED_QUIET, 45)
         assertTrue(rig.uploads.isEmpty())
         rig.loop.setMuted(false)
+        rig.settle()
         rig.utterance(POST_QUIET, POST_SPEECH)
         assertEquals(1, rig.uploads.size)
         assertEquals(setOf(POST_QUIET, POST_SPEECH), amplitudes(rig.uploads.single()))
     }
 
-    @Test fun aPauseIsNeverOverwrittenAndNoUtteranceHoldsAudioFromBeforeItsArm() {
-        // The mic thread feeds as fast as it can while the main thread arms and pauses at random; every block's
-        // first two samples carry its index, so each utterance can be traced back frame by frame.
-        val mic = MicCapture()
-        val clock = AtomicLong(0)
-        val armedAt = ConcurrentHashMap<Long, Long>()
+    @Test fun aNewRecorderOpensOnlyAfterTheOldOneIsReleased() {
+        val rig = Rig()
+        rig.loop.start(turnAlreadyRunning = false)
+        rig.settle()
+        rig.room.hold = true // the old reader is slow to come back from read()
+        rig.loop.setMuted(true)
+        rig.loop.setMuted(false)
+        Thread.sleep(150)
+        assertEquals("opened a new recorder before the old one was released", 1, rig.room.count())
+        assertEquals(0, rig.room.recordingNow())
+        rig.room.hold = false
+        rig.settle()
+        assertEquals(2, rig.room.count())
+        assertEquals(1, rig.room.recordingNow())
+        assertEquals(1, rig.room.maxRecordingAtOnce)
+    }
+
+    @Test fun transcribingAndHangingUpAlsoTurnTheMicOff() {
+        val rig = Rig()
+        rig.loop.start(turnAlreadyRunning = false)
+        rig.settle()
+        rig.utterance(PRE_QUIET, PRE_SPEECH)
+        assertEquals(VoiceCallLoop.Phase.TRANSCRIBING, rig.loop.phase)
+        rig.assertMicOff()
+        rig.loop.hangUp()
+        rig.settle()
+        rig.assertMicOff()
+    }
+
+    @Test fun underRandomMuteAndUnmuteEveryUtteranceIsFromItsOwnOpenWindowAndRecordersNeverOverlap() {
+        // A talker speaks continuously on another thread while the test thread mutes and unmutes at random; every
+        // frame carries its index, so each utterance can be traced back to when each of its frames was said.
+        val room = Room(tagged = true)
+        val window = ConcurrentHashMap<Long, LongRange>() // token -> frames said while it was open
+        val utterances = ConcurrentLinkedQueue<Pair<Long, MicCapture.Event.Utterance>>()
+        val mic = CallMic(open = { room.open(it) }, blockSamples = blockSamples, playing = { false },
+            emit = { t, e -> if (e is MicCapture.Event.Utterance) utterances += t to e }, failed = { _, e -> throw AssertionError(e) })
         val done = AtomicBoolean(false)
-        val utterances = mutableListOf<MicCapture.Event.Utterance>()
-        val reader = Thread {
+        val talker = Thread {
+            var i = 0L
             while (!done.get()) {
-                val idx = clock.getAndIncrement()
-                val amp = if (idx % 100 in 30..49) 3000 else 40
-                val f = frame(amp)
-                f[0] = (idx % 256).toShort(); f[1] = ((idx / 256) % 256).toShort(); f[2] = ((idx / 65536) % 256).toShort()
-                val e = mic.feed(f, idx * blockNanos, playing = false)
-                if (e is MicCapture.Event.Utterance) synchronized(utterances) { utterances += e }
+                room.say(if (i++ % 100 in 30..49) 3000 else 40, 1)
                 java.util.concurrent.locks.LockSupport.parkNanos(20_000)
             }
         }
-        reader.start()
+        talker.start()
         val rnd = java.util.Random(7)
         var token = 0L
-        repeat(200) {
+        repeat(150) {
             token++
-            armedAt[token] = clock.get()
-            mic.arm(token, armedAt.getValue(token) * blockNanos)
-            Thread.sleep(rnd.nextInt(20).toLong())
-            token++
-            mic.pause(token)
+            val from = synchronized(room.lock) { room.spoken }
+            mic.arm(token)
+            Thread.sleep(rnd.nextInt(25).toLong())
+            mic.pause()
+            window[token] = from until synchronized(room.lock) { room.spoken }
             Thread.sleep(rnd.nextInt(3).toLong())
         }
         done.set(true)
-        reader.join()
+        talker.join()
+        assertTrue(mic.awaitReleased(5_000))
+        assertEquals(0, room.unreleased())
+        assertEquals("two recorders were recording at once", 1, room.maxRecordingAtOnce)
         assertTrue("the stress run produced no utterance", utterances.isNotEmpty())
-        for (u in utterances) {
-            assertTrue("utterance under a pause token", u.token % 2 == 1L)
-            val since = armedAt.getValue(u.token)
+        for ((t, u) in utterances) {
+            val open = window.getValue(t)
             val samples = (0 until (u.wav.size - 44) / 2).map { i ->
                 ((u.wav[44 + 2 * i].toInt() and 0xff) or (u.wav[45 + 2 * i].toInt() shl 8)).toShort().toInt()
             }
             for (start in samples.indices step blockSamples) {
                 val idx = (samples[start] and 0xff) + (samples[start + 1] and 0xff) * 256L + (samples[start + 2] and 0xff) * 65536L
-                assertTrue("frame $idx predates its arm at $since", idx >= since)
+                assertTrue("frame $idx was said outside window $t ($open)", idx in open)
             }
         }
     }
