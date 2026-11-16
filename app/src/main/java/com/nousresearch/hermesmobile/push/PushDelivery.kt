@@ -201,6 +201,7 @@ object PushDelivery {
             putString(PushClear.EXTRA_SESSION, event?.optString("session_id").orEmpty())
             putString(PushClear.EXTRA_CONNECTION, connection)
             putString(PushClear.EXTRA_PROFILE, profile)
+            putString(PushClear.EXTRA_TYPE, event?.optString("event_type").orEmpty())
         })
         if (merged != null) {
             // The file that followed this text: an action button that downloads and opens it.

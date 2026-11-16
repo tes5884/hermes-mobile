@@ -38,10 +38,26 @@ class PushClearTest {
     @Test fun noticePostedBeforeThisVersionIsFoundThroughTheInbox() {
         // No extras on it (posted by vc89): the push inbox knows its chat.
         val old = Shown("e9", ezraGroup, false, "", "", "")
-        val stored = mapOf("e9" to ("s-chat" to "home"), "e8" to ("s-other" to "home"))
-        val plan = PushClear.plan(listOf(old, Shown("e8", ezraGroup, false, "", "", "")), stored, "s-chat", "home")
+        val stored = mapOf("e9" to PushClear.Stored("s-chat", "home", "ezra", "turn_completed"),
+            "e8" to PushClear.Stored("s-other", "home", "ezra", "turn_completed"))
+        val plan = PushClear.plan(listOf(old, Shown("e8", ezraGroup, false, "", "", ""), summary()), stored, "s-chat", "home")
         assertEquals(listOf("e9"), plan.cancel)
+        // Shomer Low (t_085ba172): the recount needs the bot and server, taken from the inbox when extras are missing.
+        assertEquals(PushClear.GroupLeft(ezraGroup, "summary:home|ezra", 1, "home", "ezra"), plan.groups.single())
+    }
+
+    @Test fun approvalStaysUntilTheServerResolvesIt() {
+        // Shomer Medium (t_085ba172): back in the app before the gateway replays the card → the approval notice must
+        // stay, or nothing alerts him before it times out. approval_resolved withdraws it (PushDelivery.handle).
+        val approval = notice("a1", "s-chat").copy(type = "approval_required")
+        val answer = notice("e1", "s-chat").copy(type = "turn_completed")
+        val plan = PushClear.plan(listOf(approval, answer, summary()), emptyMap(), "s-chat", "home")
+        assertEquals(listOf("e1"), plan.cancel)
         assertEquals(1, plan.groups.single().left)
+        // The same for a vc89 approval known only through the inbox.
+        val oldApproval = Shown("a2", ezraGroup, false, "", "", "")
+        val stored = mapOf("a2" to PushClear.Stored("s-chat", "home", "ezra", "approval_required"))
+        assertTrue(PushClear.plan(listOf(oldApproval), stored, "s-chat", "home").cancel.isEmpty())
     }
 
     @Test fun placeholderWithNoKnownChatStays() {
@@ -67,5 +83,7 @@ class PushClearTest {
             Regex("""Lifecycle\.Event\.ON_RESUME[\s\S]{0,300}PushClear\.clear\(appContext, openChat, openConnection\)""").containsMatchIn(app))
         val delivery = File("src/main/java/com/nousresearch/hermesmobile/push/PushDelivery.kt").readText()
         assertTrue("every notice records its chat", delivery.contains("putString(PushClear.EXTRA_SESSION, event?.optString(\"session_id\")"))
+        assertTrue("every notice records its type", delivery.contains("putString(PushClear.EXTRA_TYPE, event?.optString(\"event_type\")"))
+        assertTrue("a resolved approval is still withdrawn by the server", delivery.contains("\"approval_resolved\""))
     }
 }
