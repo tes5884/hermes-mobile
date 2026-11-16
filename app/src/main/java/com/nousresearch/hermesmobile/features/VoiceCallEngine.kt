@@ -8,6 +8,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
@@ -22,7 +23,7 @@ import com.nousresearch.hermesmobile.data.CallRouteKind
 import com.nousresearch.hermesmobile.data.CallRoutes
 import com.nousresearch.hermesmobile.data.HermesHttpException
 import com.nousresearch.hermesmobile.data.HermesRestClient
-import com.nousresearch.hermesmobile.data.UtteranceEndpointer
+import com.nousresearch.hermesmobile.data.MicCapture
 import com.nousresearch.hermesmobile.data.VoiceCallLoop
 import com.nousresearch.hermesmobile.data.VoiceCallUi
 import kotlinx.coroutines.CoroutineScope
@@ -37,7 +38,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import kotlin.coroutines.resume
@@ -128,7 +128,7 @@ class VoiceCallEngine(
     private var armToken = 0L
 
     override fun armMic() { armToken++; mic.arm(armToken) }
-    override fun pauseMic() { armToken++; mic.pause() }
+    override fun pauseMic() { armToken++; mic.pause(armToken) }
     override fun stopSpeech() = speaker.stop()
     override fun speak(sentence: String) = speaker.say(sentence)
     override fun interruptTurn() = host.interruptVoiceTurn()
@@ -376,21 +376,22 @@ class VoiceCallEngine(
     private val mic = Mic()
 
     /**
-     * Reads the mic in 30 ms blocks for the whole call. ARMED runs the barge detector (the speaker tells it whether the
-     * bot is audible); on a trip it keeps the 1.2 s pre-roll so the first syllable isn't lost and captures until quiet.
-     * PAUSED reads and discards (mute, transcribing, on hold). Events carry the arm token they started under, so one
-     * that was overtaken by a newer arm/pause on the main thread is dropped.
+     * Reads the mic in 30 ms blocks for the whole call and hands each to [MicCapture] (pre-roll, barge detector,
+     * endpointer, WAV): ARMED runs the barge detector (the speaker tells it whether the bot is audible); on a trip it
+     * keeps the 1.2 s pre-roll so the first syllable isn't lost and captures until quiet. PAUSED (mute, transcribing,
+     * on hold) discards, and nothing recorded while paused can reach a later utterance: each block carries when it
+     * was recorded, and pause/arm reset the buffers. Events carry the arm token they started under, so one that was
+     * overtaken by a newer arm/pause on the main thread is dropped.
      */
     private inner class Mic {
         private val rate = 16_000
         private val block = rate * BargeDetector.BLOCK_MS / 1000
-        @Volatile private var mode = 0 // 0 paused, 1 armed, 2 capturing
-        @Volatile private var token = 0L
+        private val capture = MicCapture(rate)
         @Volatile private var alive = false
         private var thread: Thread? = null
 
-        fun arm(t: Long) { token = t; mode = 1 }
-        fun pause() { mode = 0 }
+        fun arm(t: Long) = capture.arm(t, System.nanoTime())
+        fun pause(t: Long) = capture.pause(t)
 
         fun start() {
             alive = true
@@ -400,56 +401,49 @@ class VoiceCallEngine(
             } }, "hermes-call-mic").also { it.start() }
         }
 
-        fun finish() { alive = false; mode = 0 }
+        fun finish() { alive = false; capture.pause(Long.MIN_VALUE) }
 
         @android.annotation.SuppressLint("MissingPermission") // the call button asks for RECORD_AUDIO first
         private fun read() {
             val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val bufferBytes = maxOf(min, block * 2 * 8)
             val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, rate, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, maxOf(min, block * 2 * 8))
+                AudioFormat.ENCODING_PCM_16BIT, bufferBytes)
             check(rec.state == AudioRecord.STATE_INITIALIZED) { "microphone unavailable" }
             val aec = if (AcousticEchoCanceler.isAvailable()) runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
             val ns = if (NoiseSuppressor.isAvailable()) runCatching { NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true } }.getOrNull() else null
             try {
                 rec.startRecording()
                 val buf = ShortArray(block)
-                val preRoll = ArrayDeque<ShortArray>()
-                var detector: BargeDetector? = null
-                var detectorToken = -1L
-                var capture: MutableList<ShortArray>? = null
-                var endpointer: UtteranceEndpointer? = null
-                var captureToken = 0L
+                val stamp = AudioTimestamp()
+                val nanosPerSample = 1_000_000_000.0 / rate
+                // No recorder timestamp: assume the block is as old as it could be (a whole buffer behind the read).
+                val worstLagNanos = ((bufferBytes / 2 + block) * nanosPerSample).toLong()
+                val slackNanos = BargeDetector.BLOCK_MS * 1_000_000L
+                var position = 0L
                 while (alive) {
                     val n = rec.read(buf, 0, block)
+                    val readAt = System.nanoTime()
                     if (n <= 0) { Thread.sleep(10); continue }
-                    val frame = buf.copyOf(n)
-                    preRoll.addLast(frame)
-                    if (preRoll.size > 40) preRoll.removeFirst()
-                    val rms = rms(frame)
-                    when (mode) {
-                        1 -> {
-                            val t = token
-                            if (detector == null || detectorToken != t) { detector = BargeDetector(); detectorToken = t }
-                            val phase = detector.feed(rms, speaker.playing) ?: continue
-                            capture = preRoll.toMutableList()
-                            endpointer = UtteranceEndpointer(detector.quietFloor)
-                            captureToken = t
-                            mode = 2
-                            val barge = phase == BargePhase.PLAYBACK
+                    val first = position
+                    position += n
+                    // When the block's first sample was recorded, on arm()'s clock, erring early (so it is dropped
+                    // rather than kept if it might predate an unmute).
+                    val startedAt = if (rec.getTimestamp(stamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS)
+                        stamp.nanoTime + ((first - stamp.framePosition) * nanosPerSample).toLong() - slackNanos
+                    else readAt - worstLagNanos
+                    when (val e = capture.feed(buf.copyOf(n), startedAt, speaker.playing)) {
+                        is MicCapture.Event.SpeechStart -> {
+                            val t = e.token
+                            val barge = e.phase == BargePhase.PLAYBACK
                             main.post { if (running && t == armToken) loop.onSpeechStart(barge) }
                         }
-                        2 -> {
-                            if (token != captureToken) { mode = 1; capture = null; continue }
-                            capture?.add(frame)
-                            if (endpointer?.feed(rms) == true) {
-                                val wav = wav(capture.orEmpty())
-                                val t = captureToken
-                                capture = null
-                                mode = 0
-                                main.post { if (running && t == armToken) loop.onUtterance(wav) }
-                            }
+                        is MicCapture.Event.Utterance -> {
+                            val t = e.token
+                            val wav = e.wav
+                            main.post { if (running && t == armToken) loop.onUtterance(wav) }
                         }
-                        else -> { detector = null }
+                        null -> Unit
                     }
                 }
             } finally {
@@ -457,25 +451,6 @@ class VoiceCallEngine(
                 rec.release()
                 aec?.release(); ns?.release()
             }
-        }
-
-        private fun rms(frame: ShortArray): Double {
-            var sum = 0.0
-            for (s in frame) sum += s.toDouble() * s
-            return kotlin.math.sqrt(sum / frame.size.coerceAtLeast(1))
-        }
-
-        /** 16 kHz mono 16-bit WAV, what Hermes's STT path expects. */
-        private fun wav(frames: List<ShortArray>): ByteArray {
-            val samples = frames.sumOf { it.size }
-            val out = ByteArrayOutputStream(44 + samples * 2)
-            fun int(v: Int) { out.write(v and 0xff); out.write(v shr 8 and 0xff); out.write(v shr 16 and 0xff); out.write(v shr 24 and 0xff) }
-            fun short(v: Int) { out.write(v and 0xff); out.write(v shr 8 and 0xff) }
-            out.write("RIFF".toByteArray()); int(36 + samples * 2); out.write("WAVE".toByteArray())
-            out.write("fmt ".toByteArray()); int(16); short(1); short(1); int(rate); int(rate * 2); short(2); short(16)
-            out.write("data".toByteArray()); int(samples * 2)
-            for (f in frames) for (s in f) short(s.toInt())
-            return out.toByteArray()
         }
     }
 }
