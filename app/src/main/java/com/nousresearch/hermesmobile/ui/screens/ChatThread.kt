@@ -362,6 +362,15 @@ internal fun ChatThread(
             }
 
             Column(Modifier.widthIn(max = ReadableWidth).align(Alignment.CenterHorizontally)) {
+            // Messages waiting for the gateway's turn (t_cde1eeab): why, and when the turn waits on you, a jump to the card.
+            TurnWaitBanner(
+                com.nousresearch.hermesmobile.data.OwnerRefusal.banner(
+                    queuedPrompts,
+                    approvalWaiting = bot?.approvals?.any { it.state == com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING } == true,
+                    bot = bot?.profile?.label
+                ),
+                onShow = ::jumpToLatest
+            )
             if (SlashCommands.query(draft) != null) SlashSuggestions(slashPalette, actions.onApplySlash)
             MentionSuggestions(mentionCandidates) { handle ->
                 val at = draft.lastIndexOf('@')
@@ -856,13 +865,20 @@ private fun QueueLane(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
             ) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        item.text.ifBlank { item.attachments.joinToString { it.name } },
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            item.text.ifBlank { item.attachments.joinToString { it.name } },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        // Never re-sent by itself: it may already be waiting on the gateway (t_cde1eeab).
+                        if (item.hold == QueuedPrompt.HOLD_UNCONFIRMED) Text(
+                            stringResource(R.string.queue_item_unconfirmed),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                     IconButton(onClick = { onMove(item.id, -1) }, enabled = index > 0) {
                         Icon(Icons.Default.KeyboardArrowUp, stringResource(R.string.a22_move_up), Modifier.size(18.dp))
                     }
@@ -877,6 +893,36 @@ private fun QueueLane(
         if (queuedPrompts.size > 4) {
             Text(stringResource(R.string.a22_more_queued, queuedPrompts.size - 4), style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp))
+        }
+    }
+}
+
+/**
+ * The line over the composer while messages wait for a turn the gateway is running (t_cde1eeab): "Queued, sends when
+ * Ezra's turn ends", or, when that turn waits for an approval in this chat, "Ezra is waiting for your OK above" with
+ * Show, which brings the card (at the newest point of the chat) into view.
+ */
+@Composable
+private fun TurnWaitBanner(banner: com.nousresearch.hermesmobile.data.OwnerRefusal.Banner?, onShow: () -> Unit) {
+    banner ?: return
+    val waiting = banner is com.nousresearch.hermesmobile.data.OwnerRefusal.Banner.WaitingForOk
+    Surface(
+        color = if (waiting) com.nousresearch.hermesmobile.ui.theme.HermesTokens.Orange.copy(alpha = .14f) else MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp).heightIn(min = 40.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Schedule, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                when (banner) {
+                    is com.nousresearch.hermesmobile.data.OwnerRefusal.Banner.WaitingForOk -> stringResource(R.string.queue_waiting_for_ok, banner.bot)
+                    is com.nousresearch.hermesmobile.data.OwnerRefusal.Banner.QueuedForTurn ->
+                        banner.bot?.let { stringResource(R.string.queue_held_for_turn, it) } ?: stringResource(R.string.queue_held_for_turn_generic)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f).padding(start = 8.dp)
+            )
+            if (waiting) TextButton(onClick = onShow) { Text(stringResource(R.string.queue_waiting_for_ok_show)) }
         }
     }
 }

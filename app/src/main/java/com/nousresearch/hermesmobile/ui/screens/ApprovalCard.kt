@@ -115,7 +115,8 @@ internal fun InlineApprovalCard(card: ApprovalCards.Card, botName: String, onAns
                 Spacer(Modifier.height(12.dp))
                 // Neither button is focused by default; Approve once is the filled one, Deny the outline.
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
+                    // A Deny-only request (the phone cannot show all of it) has no Approve.
+                    if (card.allowOnce) Button(
                         onClick = { haptics.performHapticFeedback(HapticFeedbackType.Confirm); onAnswer("once") },
                         modifier = Modifier.weight(1f).heightIn(min = 52.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.inverseSurface, contentColor = MaterialTheme.colorScheme.inverseOnSurface)

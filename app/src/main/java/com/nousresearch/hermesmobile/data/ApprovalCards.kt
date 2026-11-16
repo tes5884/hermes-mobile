@@ -22,7 +22,9 @@ object ApprovalCards {
         val allowAlways: Boolean = false,
         val createdAtMs: Long,
         val state: State = State.PENDING,
-        val resolvedAtMs: Long = 0L
+        val resolvedAtMs: Long = 0L,
+        /** False on a Deny-only request (an approval from a gateway turn the phone cannot show in full). */
+        val allowOnce: Boolean = true
     ) {
         /** Hermes' [description] is a sentence written for the user, not just the name of the pattern that stopped it. */
         val plainDescription: Boolean get() = !CommandSummary.isPatternLabel(description, reason)
@@ -52,12 +54,12 @@ object ApprovalCards {
             description.lineSequence().filter { it.isNotBlank() }.drop(1).joinToString(" ").trim()
     }
 
-    /** What an approval request offers on this card: once, always (only when Hermes allows it), deny. */
+    /** What an approval request offers on this card: once (unless the request is Deny-only), always (only when Hermes allows it), deny. */
     fun choices(params: JSONObject): List<String> {
         val arr = params.optJSONArray("choices")
         val offered = if (arr == null || arr.length() == 0) listOf("once", "deny") else (0 until arr.length()).map { arr.optString(it) }
         val always = "always" in offered && params.optBoolean("allow_permanent", true) && !params.optBoolean("smart_denied", false)
-        return listOfNotNull("once", "always".takeIf { always }, "deny")
+        return listOfNotNull("once".takeIf { it in offered }, "always".takeIf { always }, "deny")
     }
 
     fun fromRequest(requestId: String, params: JSONObject, nowMs: Long): Card = Card(
@@ -66,7 +68,8 @@ object ApprovalCards {
         command = params.optString("command").trim(),
         reason = params.optString("pattern_key").trim().takeIf { it.isNotBlank() && it != params.optString("description").trim() }.orEmpty(),
         allowAlways = "always" in choices(params),
-        createdAtMs = nowMs
+        createdAtMs = nowMs,
+        allowOnce = "once" in choices(params)
     )
 
     fun stateFor(choice: String): State = when (choice) {

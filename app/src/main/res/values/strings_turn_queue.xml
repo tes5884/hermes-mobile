@@ -1,0 +1,9 @@
+<resources>
+    <!-- Messages refused while the gateway's turn runs, and approvals of gateway turns (t_cde1eeab). -->
+    <string name="queue_waiting_for_ok">%1$s is waiting for your OK above</string>
+    <string name="queue_waiting_for_ok_show">Show</string>
+    <string name="queue_held_for_turn">Queued, sends when %1$s\'s turn ends</string>
+    <string name="queue_held_for_turn_generic">Queued, sends when the current turn ends</string>
+    <string name="queue_item_unconfirmed">May already be queued: check the chat. Edit it to send it again.</string>
+    <string name="gateway_approval_already">That approval was already answered or has ended.</string>
+</resources>

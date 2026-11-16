@@ -992,8 +992,17 @@ data class QueuedPrompt(
     val id: String,
     val text: String,
     val attachments: List<ComposerAttachment> = emptyList(),
-    val createdAt: Long = System.currentTimeMillis()
-)
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Why it waits, when Hermes refused it ([OwnerRefusal]): null = an ordinary queued message. */
+    val hold: String? = null
+) {
+    companion object {
+        /** Refused while the gateway's turn runs: sent again by itself until it goes through. */
+        const val HOLD_BUSY = "busy"
+        /** May already be queued on the gateway: never sent again by itself. */
+        const val HOLD_UNCONFIRMED = "unconfirmed"
+    }
+}
 
 data class SessionModelChoice(
     val provider: String,

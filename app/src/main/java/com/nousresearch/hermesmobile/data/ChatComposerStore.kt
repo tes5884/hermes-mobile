@@ -39,7 +39,8 @@ class ChatComposerStore(context: Context) {
                                     id = row.optString("id"),
                                     text = row.optString("text"),
                                     attachments = attachmentsFromJson(row.optJSONArray("attachments")),
-                                    createdAt = row.optLong("created_at", 0L)
+                                    createdAt = row.optLong("created_at", 0L),
+                                    hold = row.optString("hold").takeIf { it == QueuedPrompt.HOLD_BUSY || it == QueuedPrompt.HOLD_UNCONFIRMED }
                                 )
                             )
                         }
@@ -63,6 +64,7 @@ class ChatComposerStore(context: Context) {
                     .put("text", row.text)
                     .put("created_at", row.createdAt)
                     .put("attachments", attachmentsToJson(row.attachments))
+                    .apply { row.hold?.let { put("hold", it) } }
             }))
         prefs.edit().putString(key, encrypt(root.toString())).apply()
     }

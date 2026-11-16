@@ -37,6 +37,9 @@ class InlineApprovalRouter<R>(
 
     val pendingIds: Set<String> get() = cards.keys.toSet()
 
+    /** Every request shown as a card or waiting for an opening chat. */
+    val requests: List<R> get() = cards.values.toList() + held
+
     fun belongs(request: R, surface: Surface?): Boolean {
         if (surface == null || methodOf(request) != "approval") return false
         val sid = sessionOf(request)

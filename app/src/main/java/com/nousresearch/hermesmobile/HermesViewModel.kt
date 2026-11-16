@@ -457,10 +457,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         if (!foreground) {
             persistComposerSoon(immediate = true)
             liveSessionsJob?.cancel()
+            gatewayApprovalsJob?.cancel()
             groupPollingJob?.cancel()
             telegramOnboardingPollingJob?.cancel()
         } else if (becameAvailable) {
             startLiveSessions()
+            startGatewayApprovals()
             if (uiState.section == MainSection.BOTS) uiState.activeGroup?.let { startGroupPolling(it.room.roomId, groupGeneration) }
             if (uiState.section == MainSection.MESSAGING) uiState.telegramOnboarding?.takeUnless { it.status.lowercase() in setOf("ready", "expired", "cancelled", "failed", "error") }?.let { pollTelegramOnboarding(uiState.selectedProfile, it) }
         }
@@ -649,6 +651,9 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         telegramOnboardingPollingJob?.cancel()
         nativeAuthJob?.cancel()
         liveSessionsJob?.cancel()
+        gatewayApprovalsJob?.cancel()
+        gatewayApprovalsUnsupported.clear()
+        gatewayApprovalsAnswered.clear()
         liveSessions.clear()
         groupGeneration += 1
         clearAvatarCache()
@@ -766,6 +771,107 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     if (changed || (viewing != null && liveSessions.seen(viewing))) uiState = uiState.copy(sessionDots = liveSessions.dots())
                 }
                 kotlinx.coroutines.withTimeoutOrNull(LIVE_SESSIONS_POLL_MS) { liveSessionsPoke.receive() }
+            }
+        }
+    }
+
+    // ---- Approvals of turns the gateway owns (t_cde1eeab) ----------------------------------------------------
+    private var gatewayApprovalsJob: Job? = null
+    private val gatewayApprovalsPoke = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    /** Bots (connection:profile) whose plugin predates approval.pending: not asked again on this connection. */
+    private val gatewayApprovalsUnsupported = mutableSetOf<String>()
+    /** Gateway approvals answered on this phone whose answer is in flight or done: never shown again as waiting. */
+    private val gatewayApprovalsAnswered = mutableSetOf<String>()
+
+    /**
+     * While the app is in front: asks the bot chat on screen (and every chat a listed approval still waits for in the
+     * dialog or as a card) for approvals waiting in a turn the gateway owns, at once on [gatewayApprovalsPoke] (a chat
+     * opens or resumes, the screen changes, the connection comes back) and every [GatewayApprovals.POLL_MS].
+     */
+    private fun startGatewayApprovals() {
+        if (!appForeground || gatewayApprovalsJob?.isActive == true) return
+        val repo = repository ?: return
+        gatewayApprovalsJob = viewModelScope.launch {
+            while (repository === repo && appForeground) {
+                runCatching { pollGatewayApprovals() }.onFailure { if (it is CancellationException) throw it }
+                kotlinx.coroutines.withTimeoutOrNull(com.nousresearch.hermesmobile.data.GatewayApprovals.POLL_MS) { gatewayApprovalsPoke.receive() }
+            }
+        }
+    }
+
+    /** Every gateway approval this phone shows now: cards, held, the dialog and its queue. */
+    private fun shownGatewayApprovals(): List<ServerInteraction> =
+        (approvalRouter.requests + listOfNotNull(uiState.interaction) + uiState.interactionQueue)
+            .filter { com.nousresearch.hermesmobile.data.GatewayApprovals.isGateway(it) }.distinctBy { it.requestId }
+
+    private suspend fun pollGatewayApprovals() {
+        if (uiState.connectionState != GatewayConnectionState.CONNECTED) return
+        val connection = uiState.activeConnectionId ?: return
+        val epoch = connectionEpoch
+        val chat = uiState.activeChat
+        val onScreen = chat?.takeIf { chatViewOf(uiState, connectionEpoch).surface != null }
+            ?.let { com.nousresearch.hermesmobile.data.GatewayApprovals.Watch(connection, it.profile, it.storedSessionId) }
+        val watches = com.nousresearch.hermesmobile.data.GatewayApprovals.watches(onScreen, shownGatewayApprovals(), connection)
+        if (watches.isEmpty()) return
+        val app = getApplication<Application>()
+        val accounts = withContext(Dispatchers.IO) { runCatching { com.nousresearch.hermesmobile.push.PushStore(app).accounts() }.getOrDefault(emptyList()) }
+        for (watch in watches) {
+            val account = accounts.firstOrNull { it.connection == watch.connection && it.profile == watch.profile && it.device.isNotEmpty() } ?: continue
+            if (account.key in gatewayApprovalsUnsupported) continue
+            val result = withContext(Dispatchers.IO) {
+                runCatching { com.nousresearch.hermesmobile.push.PushClient.call(account, "approval.pending", JSONObject().put("session_id", watch.sessionId)) }
+            }
+            if (epoch != connectionEpoch || uiState.activeConnectionId != connection) return
+            val listing = result.getOrElse { t ->
+                if (t is CancellationException) throw t
+                if (com.nousresearch.hermesmobile.data.GatewayApprovals.unsupported((t as? com.nousresearch.hermesmobile.push.PushRpcException)?.code)) {
+                    gatewayApprovalsUnsupported += account.key
+                }
+                null
+            } ?: continue
+            applyGatewayApprovals(watch, com.nousresearch.hermesmobile.data.GatewayApprovals.parse(watch, listing))
+        }
+    }
+
+    /** One chat's listing: new ones are routed like any approval (card in the chat on screen, else the dialog); gone ones leave. */
+    private fun applyGatewayApprovals(watch: com.nousresearch.hermesmobile.data.GatewayApprovals.Watch, listed: List<ServerInteraction>) {
+        val shown = shownGatewayApprovals()
+        com.nousresearch.hermesmobile.data.GatewayApprovals.gone(watch, shown, listed).forEach { id ->
+            completeInteraction(id)
+            withdrawInlineApproval(id)
+            gatewayApprovalsAnswered -= id
+        }
+        val known = shown.map { it.requestId }.toSet()
+        listed.filter { it.requestId !in known && it.requestId !in gatewayApprovalsAnswered }.forEach(::routeApproval)
+    }
+
+    /** The answer to a gateway approval goes back through the plugin with its token, never on the chat socket. */
+    private fun answerGatewayApproval(request: ServerInteraction, choice: String) {
+        val watch = com.nousresearch.hermesmobile.data.GatewayApprovals.watchOf(request) ?: return
+        val token = com.nousresearch.hermesmobile.data.GatewayApprovals.token(request)
+        gatewayApprovalsAnswered += request.requestId
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val account = com.nousresearch.hermesmobile.push.PushStore(app).accounts()
+                        .firstOrNull { it.connection == watch.connection && it.profile == watch.profile && it.device.isNotEmpty() }
+                        ?: throw com.nousresearch.hermesmobile.push.PushRpcException("not_paired")
+                    com.nousresearch.hermesmobile.push.PushClient.call(account, "approval.answer", JSONObject().put("token", token).put("choice", choice))
+                }
+            }
+            outcome.onSuccess { result ->
+                if (result.optString("status") == "already_resolved") uiState = uiState.copy(snackbar = string(R.string.gateway_approval_already))
+            }.onFailure { t ->
+                if (t is CancellationException) throw t
+                val code = (t as? com.nousresearch.hermesmobile.push.PushRpcException)?.code ?: t.message
+                // Still waiting? The next listing shows it again (with a fresh token), so nothing is answered by accident;
+                // the card does not claim an answer that did not go in.
+                gatewayApprovalsAnswered -= request.requestId
+                val cards = uiState.approvalCards.filterNot { it.requestId == request.requestId && it.state != com.nousresearch.hermesmobile.data.ApprovalCards.State.PENDING }
+                uiState = uiState.copy(approvalCards = cards, error = com.nousresearch.hermesmobile.data.GatewayApprovals.answerProblem(code))
+                uiState.activeChat?.takeIf { it.storedSessionId == watch.sessionId }?.let { approvalStore.save(it.profile, it.storedSessionId, cards) }
+                gatewayApprovalsPoke.trySend(Unit)
             }
         }
     }
@@ -1660,10 +1766,15 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun updateQueuedPrompt(id: String, text: String) {
+        // Saving an edit of one that may already be queued on the gateway is the choice to send it again (t_cde1eeab).
+        val released = uiState.queuedPrompts.any { it.id == id && it.hold == QueuedPrompt.HOLD_UNCONFIRMED }
         uiState = uiState.copy(
-            queuedPrompts = uiState.queuedPrompts.map { if (it.id == id) it.copy(text = text) else it }
+            queuedPrompts = uiState.queuedPrompts.map {
+                if (it.id == id) it.copy(text = text, hold = if (released) null else it.hold) else it
+            }
         )
         persistComposerSoon(immediate = true)
+        if (released) uiState.activeChat?.takeIf { !it.running }?.let { drainQueuedPromptSoon(it.runtimeSessionId) }
     }
 
     fun moveQueuedPrompt(id: String, delta: Int) {
@@ -1858,6 +1969,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             refreshSessionMeta()
             // Its turn ended while the chat was closed: what was queued for it goes out now.
             uiState.activeChat?.takeIf { !it.readOnly && !it.running }?.let { drainQueuedPromptSoon(it.runtimeSessionId) }
+            // One refused while the gateway's turn ran keeps being tried while the chat is open (t_cde1eeab).
+            if (saved.queue.any { it.hold == QueuedPrompt.HOLD_BUSY }) retryHeldSoon(runtime)
         }
     }
 
@@ -3661,8 +3774,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 val current = uiState.activeChat
                 if (current?.runtimeSessionId == chat.runtimeSessionId) {
                     val canRestore = uiState.chatDraft.isBlank() && uiState.composerAttachments.isEmpty()
-                    // Something else is typed: the failed prompt goes back to the head of the queue, never lost.
-                    val requeue = !canRestore && rewind == null
+                    // Never lost (t_cde1eeab): a send refused while the gateway's turn runs waits in the queue and goes
+                    // again by itself; one that may already be queued there is kept but never re-sent by itself.
+                    val reason = com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)
+                    val outcome = com.nousresearch.hermesmobile.data.OwnerRefusal.outcome(reason, canRestore, rewind != null)
+                    val held = when (outcome) {
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.RETRY_QUEUE -> QueuedPrompt.HOLD_BUSY
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.HOLD_QUEUE -> QueuedPrompt.HOLD_UNCONFIRMED
+                        else -> null
+                    }
+                    val toQueue = outcome == com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.QUEUE || held != null
+                    val toDraft = outcome == com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.DRAFT
                     uiState = uiState.copy(
                         activeChat = current.copy(
                             // A failed edit puts the chat back as it was.
@@ -3672,15 +3794,27 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             },
                             running = false
                         ),
-                        chatDraft = if (canRestore) prompt else uiState.chatDraft,
-                        composerAttachments = if (canRestore) attachments else uiState.composerAttachments,
-                        queuedPrompts = if (requeue) {
-                            listOf(QueuedPrompt(UUID.randomUUID().toString(), prompt, attachments)) + uiState.queuedPrompts
+                        chatDraft = if (toDraft) prompt else uiState.chatDraft,
+                        composerAttachments = if (toDraft) attachments else uiState.composerAttachments,
+                        queuedPrompts = if (toQueue) {
+                            listOf(QueuedPrompt(UUID.randomUUID().toString(), prompt, attachments, hold = held)) + uiState.queuedPrompts
                         } else uiState.queuedPrompts,
                         liveStatuses = uiState.liveStatuses.filterNot { it.id == "attachments" },
-                        error = t.message
+                        // A held message is explained by the line over the composer, not an error.
+                        error = if (held == QueuedPrompt.HOLD_BUSY) uiState.error else t.message
                     )
                     persistComposerSoon(immediate = true)
+                    if (held == QueuedPrompt.HOLD_BUSY) retryHeldSoon(chat.runtimeSessionId)
+                } else if (rewind == null) {
+                    // The chat was left while it was refused: it waits in that chat's queue (sent when it opens again).
+                    val hold = when (com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)) {
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.BUSY -> QueuedPrompt.HOLD_BUSY
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.UNCONFIRMED -> QueuedPrompt.HOLD_UNCONFIRMED
+                        else -> null
+                    }
+                    if (hold != null) restoreQueue(chat, listOf(QueuedPrompt(UUID.randomUUID().toString(), prompt, attachments, hold = hold)))
+                    val reopened = uiState.activeChat?.takeIf { it.storedSessionId == chat.storedSessionId }
+                    if (hold == QueuedPrompt.HOLD_BUSY && reopened != null) retryHeldSoon(reopened.runtimeSessionId)
                 }
             }
         }
@@ -3723,11 +3857,13 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
      */
     private fun handOffQueue(): Job? {
         val chat = uiState.activeChat?.takeUnless { it.readOnly } ?: return null
-        val prompts = uiState.queuedPrompts
+        // One that may already be queued on the gateway is never sent by itself: it stays with the chat.
+        val prompts = uiState.queuedPrompts.filter { it.hold != QueuedPrompt.HOLD_UNCONFIRMED }
+        val kept = uiState.queuedPrompts.filter { it.hold == QueuedPrompt.HOLD_UNCONFIRMED }
         val repo = repository
         if (prompts.isEmpty() || repo == null) return null
         // Out of the queue before sending: reopening the chat meanwhile must not drain them a second time.
-        uiState = uiState.copy(queuedPrompts = emptyList())
+        uiState = uiState.copy(queuedPrompts = kept)
         persistCurrentComposerNow()
         val app = getApplication<Application>()
         val previous = queueHandoffJob
@@ -3745,8 +3881,21 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 sent.exceptionOrNull()?.let { t ->
                     com.nousresearch.hermesmobile.push.PushDelivery.releaseTurn(app, chat.storedSessionId)
                     if (t is CancellationException) throw t
-                    restoreQueue(chat, prompts.drop(index))
-                    uiState = uiState.copy(error = t.message)
+                    // Refused while the gateway's turn runs: kept, marked, and sent when the chat is open again.
+                    val rest = prompts.drop(index)
+                    when (com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)) {
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.BUSY ->
+                            restoreQueue(chat, listOf(rest.first().copy(hold = QueuedPrompt.HOLD_BUSY)) + rest.drop(1))
+                        com.nousresearch.hermesmobile.data.OwnerRefusal.UNCONFIRMED -> {
+                            restoreQueue(chat, listOf(rest.first().copy(hold = QueuedPrompt.HOLD_UNCONFIRMED)) + rest.drop(1))
+                            uiState = uiState.copy(error = t.message)
+                        }
+                        else -> {
+                            restoreQueue(chat, rest)
+                            uiState = uiState.copy(error = t.message)
+                        }
+                    }
+                    uiState.activeChat?.takeIf { it.storedSessionId == chat.storedSessionId }?.let { retryHeldSoon(it.runtimeSessionId) }
                     return@launch
                 }
             }
@@ -3791,10 +3940,35 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         if (readOnlyActiveChat()) return
         val current = uiState.activeChat ?: return
         if (current.runtimeSessionId != expectedRuntimeId || current.running) return
-        val next = uiState.queuedPrompts.firstOrNull() ?: return
-        uiState = uiState.copy(queuedPrompts = uiState.queuedPrompts.drop(1))
+        // Never one that may already be queued on the gateway (t_cde1eeab): that waits for you.
+        val next = com.nousresearch.hermesmobile.data.OwnerRefusal.nextToSend(uiState.queuedPrompts) ?: return
+        uiState = uiState.copy(queuedPrompts = uiState.queuedPrompts.filterNot { it.id == next.id })
         persistComposerSoon(immediate = true)
         submitPromptNow(current, next.text, next.attachments, fromQueue = true)
+    }
+
+    private var heldRetryJob: Job? = null
+
+    /**
+     * A message refused while the gateway's turn runs is sent again by itself (t_cde1eeab): the gateway's own turn ends
+     * without any event on this app's wire, so it is simply tried again every few seconds while its chat is open and
+     * the app is in front, until it goes through (or comes back unconfirmed, which is never re-sent by itself).
+     */
+    private fun retryHeldSoon(runtimeId: String) {
+        val stored = uiState.activeChat?.takeIf { it.runtimeSessionId == runtimeId }?.storedSessionId ?: return
+        heldRetryJob?.cancel()
+        heldRetryJob = viewModelScope.launch {
+            while (true) {
+                delay(com.nousresearch.hermesmobile.data.OwnerRefusal.RETRY_MS)
+                // The same chat, even if it was resumed again meanwhile (a new runtime id).
+                val chat = uiState.activeChat ?: return@launch
+                if (chat.storedSessionId != stored) return@launch
+                if (uiState.queuedPrompts.none { it.hold == QueuedPrompt.HOLD_BUSY }) return@launch
+                if (!appForeground || chat.running || uiState.connectionState != GatewayConnectionState.CONNECTED) continue
+                drainQueuedPrompt(chat.runtimeSessionId)
+                return@launch
+            }
+        }
     }
 
     /** The turn may emit its end before the gateway clears `running`: drain a moment later. */
@@ -4475,7 +4649,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun answerApproval(choice: String) {
         val interaction = uiState.interaction ?: return
-        repository?.gateway?.respond(interaction.requestId, JSONObject().put("choice", choice))
+        if (com.nousresearch.hermesmobile.data.GatewayApprovals.isGateway(interaction)) {
+            // The dialog offers only what the plugin listed (once/deny); anything else is a deny.
+            answerGatewayApproval(interaction, if (choice == "once") "once" else "deny")
+        } else repository?.gateway?.respond(interaction.requestId, JSONObject().put("choice", choice))
         completeInteraction(interaction.requestId)
     }
 
@@ -4503,6 +4680,11 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
 
     fun cancelInteraction() {
         val interaction = uiState.interaction ?: return
+        if (com.nousresearch.hermesmobile.data.GatewayApprovals.isGateway(interaction)) {
+            answerGatewayApproval(interaction, "deny")
+            completeInteraction(interaction.requestId)
+            return
+        }
         when (interaction.method) {
             "clarify" -> repository?.gateway?.respond(interaction.requestId, JSONObject())
             "approval" -> repository?.gateway?.respond(interaction.requestId, JSONObject().put("choice", "deny"))
@@ -4557,6 +4739,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             uiState = uiState.copy(approvalCards = (stored + keepPending).sortedBy { it.createdAtMs })
             moves.toCards.forEach(::showInlineApproval)
             moves.toDialog.forEach(::enqueueInteraction)
+            // What is on screen changed: ask at once for approvals waiting in a turn the gateway owns.
+            gatewayApprovalsPoke.trySend(Unit)
         } finally {
             reconcilingChatChange = false
         }
@@ -4588,12 +4772,23 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         chatOpeningJob = viewModelScope.launch { delay(15_000); if (approvalRouter.opening) reconcileChatChange() }
     }
 
+    /** A card only for the bot chat on screen; while a chat opens its replayed requests wait to be sorted. */
+    private fun routeApproval(request: ServerInteraction) {
+        when (approvalRouter.onRequest(request, chatViewOf(uiState, connectionEpoch).surface)) {
+            com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.CARD -> showInlineApproval(request)
+            com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.HOLD -> Unit
+            com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.DIALOG -> enqueueInteraction(request)
+        }
+    }
+
     fun answerInlineApproval(requestId: String, choice: String) {
         if (choice !in setOf("once", "always", "deny")) return
-        // "Always" only where Hermes offered it on this request.
+        // "Always" only where Hermes offered it on this request; "once" not on a Deny-only one.
         if (choice == "always" && uiState.approvalCards.none { it.requestId == requestId && it.allowAlways }) return
+        if (choice == "once" && uiState.approvalCards.any { it.requestId == requestId && !it.allowOnce }) return
         val request = approvalRouter.answer(requestId) ?: return
-        repository?.gateway?.respond(request.requestId, JSONObject().put("choice", choice))
+        if (com.nousresearch.hermesmobile.data.GatewayApprovals.isGateway(request)) answerGatewayApproval(request, choice)
+        else repository?.gateway?.respond(request.requestId, JSONObject().put("choice", choice))
         val cards = com.nousresearch.hermesmobile.data.ApprovalCards.resolve(uiState.approvalCards, requestId, choice, System.currentTimeMillis())
         uiState = uiState.copy(approvalCards = cards)
         uiState.activeChat?.let { approvalStore.save(it.profile, it.storedSessionId, cards) }
@@ -4650,6 +4845,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         // The server's Hermes skin: the app follows it, as Desktop does (Settings → Theme).
         com.nousresearch.hermesmobile.ui.ThemeStore.saveServerSkin(getApplication(), payload.optJSONObject("skin"))
         startLiveSessions()
+        startGatewayApprovals()
+        gatewayApprovalsPoke.trySend(Unit)
         // Whether the server's hermes-android plugin is older than this app needs (Settings says so).
         repository?.let { repo -> com.nousresearch.hermesmobile.update.AppUpdates.checkPlugin(getApplication(), repo.rest.currentConfig().id, repo) }
         viewModelScope.launch(Dispatchers.Main.immediate) {
@@ -4711,12 +4908,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     override fun onServerRequest(request: ServerInteraction) {
         viewModelScope.launch(Dispatchers.Main.immediate) {
             when (request.method) {
-                // A card only for the bot chat on screen; while a chat opens its replayed requests wait to be sorted.
-                "approval" -> when (approvalRouter.onRequest(request, chatViewOf(uiState, connectionEpoch).surface)) {
-                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.CARD -> showInlineApproval(request)
-                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.HOLD -> Unit
-                    com.nousresearch.hermesmobile.data.InlineApprovalRouter.Route.DIALOG -> enqueueInteraction(request)
-                }
+                "approval" -> routeApproval(request)
                 "clarify", "sudo", "secret", "vault.code", "vault.unlock_prompt", "vault.save_login" ->
                     enqueueInteraction(request)
                 else ->
