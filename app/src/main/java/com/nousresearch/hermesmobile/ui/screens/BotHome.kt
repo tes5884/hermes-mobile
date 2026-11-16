@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.*
@@ -104,6 +105,13 @@ internal fun BotHomeContent(
     }
     val chief = remember(shown) { BotHome.chief(shown) }
     val hiddenCount = bots.count { it.profile.botHidden }
+    val strip = remember(shown, statuses) { BotHome.needsYou(shown, statuses) }
+    // List or tiles (Nova v2): remembered on the phone; search results are always a list.
+    val context = LocalContext.current
+    val prefs = remember(context) { context.getSharedPreferences("appearance", android.content.Context.MODE_PRIVATE) }
+    var view by remember { mutableStateOf(BotHome.view(prefs.getString(BotHome.VIEW_PREF, null))) }
+    val setView: (BotHome.View) -> Unit = { v -> view = v; prefs.edit().putString(BotHome.VIEW_PREF, BotHome.viewValue(v)).apply() }
+    val tiles = view == BotHome.View.TILES && query.isBlank()
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 112.dp)) {
@@ -111,6 +119,7 @@ internal fun BotHomeContent(
                 Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(stringResource(R.string.botapp_title), Modifier.weight(1f), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                        ViewToggle(view, setView)
                         IconButton(onClick = { searching = !searching; if (!searching) query = "" }) {
                             Icon(if (searching) Icons.Default.Close else Icons.Default.Search, stringResource(R.string.botapp_search))
                         }
@@ -139,6 +148,9 @@ internal fun BotHomeContent(
                 }
                 if (loading && bots.isEmpty()) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
             }
+            if (query.isBlank() && strip.isNotEmpty()) item(key = "needs-you") {
+                NeedsYouStrip(strip, statuses, avatarAssets) { actions.onOpen(it.profile) }
+            }
             if (query.isBlank()) items(pinned, key = { "pin:" + it.routeKey }) { bot ->
                 if (bot.activeConnection) LaunchedEffect(bot.profile.name, bot.profile.hasAvatar) { actions.onEnsureAvatar(bot.profile) }
                 PinnedBotCard(bot, statuses[bot.routeKey], avatarAssets[bot.profile.name].takeIf { bot.activeConnection }, use24h, actions)
@@ -146,6 +158,16 @@ internal fun BotHomeContent(
             sections.forEach { (name, members) ->
                 if (members.isEmpty()) return@forEach
                 if (name.isNotEmpty()) item(key = "h:$name") { HomeSectionLabel(name) }
+                if (tiles) {
+                    items(members.chunked(TILE_COLUMNS), key = { row -> "t:" + row.first().routeKey }) { row ->
+                        TileRow(row.size) { i ->
+                            val bot = row[i]
+                            if (bot.activeConnection) LaunchedEffect(bot.profile.name, bot.profile.hasAvatar) { actions.onEnsureAvatar(bot.profile) }
+                            BotTile(bot, statuses[bot.routeKey], avatarAssets[bot.profile.name].takeIf { bot.activeConnection }, actions)
+                        }
+                    }
+                    return@forEach
+                }
                 items(members, key = { it.routeKey }) { bot ->
                     if (bot.activeConnection) LaunchedEffect(bot.profile.name, bot.profile.hasAvatar) { actions.onEnsureAvatar(bot.profile) }
                     BotHomeRow(bot, statuses[bot.routeKey], avatarAssets[bot.profile.name].takeIf { bot.activeConnection }, use24h, actions)
@@ -153,7 +175,12 @@ internal fun BotHomeContent(
             }
             if (query.isBlank()) {
                 item(key = "h:channels") { HomeSectionLabel(stringResource(R.string.botapp_channels)) }
-                items(rooms.take(6), key = { "room:" + it.roomId }) { room ->
+                if (tiles) items(rooms.take(6).chunked(TILE_COLUMNS), key = { row -> "troom:" + row.first().roomId }) { row ->
+                    TileRow(row.size) { i ->
+                        val room = row[i]
+                        ChannelTile(room, bots, avatarAssets, roomUnread[room.roomId] ?: 0, roomPreviews[room.roomId]) { actions.onOpenChannel(room) }
+                    }
+                } else items(rooms.take(6), key = { "room:" + it.roomId }) { room ->
                     ChannelHomeRow(room, bots, avatarAssets, roomUnread[room.roomId] ?: 0, roomPreviews[room.roomId], use24h) { actions.onOpenChannel(room) }
                 }
                 item(key = "more") {
@@ -174,6 +201,191 @@ internal fun BotHomeContent(
             onSend = { f, ms -> actions.onTalk(chief.profile, f, ms) },
             modifier = Modifier.align(Alignment.BottomEnd)
         )
+    }
+}
+
+private const val TILE_COLUMNS = 3
+
+/** Header switch: two icon segments (lines / squares), the current one raised. */
+@Composable
+private fun ViewToggle(view: BotHome.View, onChange: (BotHome.View) -> Unit) {
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Row(Modifier.padding(3.dp)) {
+            listOf(
+                Triple(BotHome.View.LIST, Icons.AutoMirrored.Filled.ViewList, R.string.botapp_view_list),
+                Triple(BotHome.View.TILES, Icons.Default.GridView, R.string.botapp_view_tiles)
+            ).forEach { (v, icon, label) ->
+                val on = v == view
+                Surface(
+                    onClick = { onChange(v) }, shape = RoundedCornerShape(17.dp),
+                    color = if (on) MaterialTheme.colorScheme.surfaceContainerLowest else androidx.compose.ui.graphics.Color.Transparent,
+                    shadowElevation = if (on) 1.dp else 0.dp, modifier = Modifier.size(width = 40.dp, height = 34.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(icon, stringResource(label), Modifier.size(20.dp),
+                            tint = if (on) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A row of [count] tiles over three equal columns (a short last row keeps the tile width). */
+@Composable
+private fun TileRow(count: Int, tile: @Composable (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        repeat(TILE_COLUMNS) { i -> Box(Modifier.weight(1f)) { if (i < count) tile(i) } }
+    }
+}
+
+@Composable
+private fun BotTile(bot: RoutedBot, status: BotHome.Status?, avatar: String?, actions: BotHomeActions) {
+    var menu by remember { mutableStateOf(false) }
+    val offline = offlineLabel(bot)
+    val needsOk = offline == null && status?.kind == BotHome.Kind.NEEDS_OK
+    val unread = offline == null && status?.kind == BotHome.Kind.WAITING
+    val shape = RoundedCornerShape(16.dp)
+    Box {
+        Surface(
+            shape = shape, color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            border = BorderStroke(1.dp, if (needsOk) NeedsYou else MaterialTheme.hermes.line),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 126.dp).clip(shape)
+                .combinedClickable(onClick = { if (bot.activeConnection) actions.onOpen(bot.profile) else actions.onSwitchConnection(bot.connectionId) }, onLongClick = { menu = true })
+        ) {
+            Box(if (needsOk) Modifier.background(androidx.compose.ui.graphics.Brush.verticalGradient(
+                listOf(NeedsYou.copy(alpha = 0.10f), androidx.compose.ui.graphics.Color.Transparent))) else Modifier) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    AvatarWithDot(bot.profile, avatar, 52, if (offline == null) status else null)
+                    Spacer(Modifier.height(8.dp))
+                    Text(bot.label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(2.dp))
+                    TileStatus(status, offline)
+                }
+                if (unread) Box(Modifier.align(Alignment.TopEnd).padding(10.dp).size(10.dp).background(NeedsYou, CircleShape))
+            }
+        }
+        BotRowMenu(bot, menu, { menu = false }, actions)
+    }
+}
+
+/** A tile's status: up to two short centred lines, no role or time (the list keeps those). */
+@Composable
+private fun TileStatus(status: BotHome.Status?, offlineLabel: String?) {
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    val faint = dim.copy(alpha = 0.75f)
+    val style = MaterialTheme.typography.bodySmall
+    val center = androidx.compose.ui.text.style.TextAlign.Center
+    when {
+        offlineLabel != null -> Text(offlineLabel, style = style, color = faint, textAlign = center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        status?.kind == BotHome.Kind.NEEDS_OK -> Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.Shield, null, Modifier.size(13.dp), tint = NeedsYou)
+            Spacer(Modifier.width(3.dp))
+            Text(stringResource(R.string.botapp_needs_ok_short), style = style, color = NeedsYou, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+        status?.kind == BotHome.Kind.WORKING -> Text(
+            if (status.text.isBlank()) stringResource(R.string.a21_working) else stringResource(R.string.botapp_working_on, status.text),
+            style = style, color = dim, textAlign = center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        status?.kind == BotHome.Kind.WAITING -> Text(status.text.ifBlank { stringResource(R.string.botapp_unread) }, style = style,
+            color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium, textAlign = center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        else -> Text(status?.text?.ifBlank { null } ?: stringResource(R.string.botapp_idle), style = style, color = faint, textAlign = center,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun ChannelTile(room: GroupRoom, bots: List<RoutedBot>, avatars: Map<String, String>, unread: Int, preview: RoomPreview?, onClick: () -> Unit) {
+    val members = remember(room, bots) {
+        room.members.mapNotNull { m -> bots.firstOrNull { it.activeConnection && it.profile.name == m.profile }?.profile ?: HermesProfile(name = m.profile, displayName = m.displayName) }
+    }
+    val shape = RoundedCornerShape(16.dp)
+    Surface(shape = shape, color = MaterialTheme.colorScheme.surfaceContainerLowest, border = BorderStroke(1.dp, MaterialTheme.hermes.line),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 126.dp).clip(shape).clickable(onClick = onClick)) {
+        Box {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.size(52.dp)) {
+                    members.getOrNull(1)?.let { ProfileAvatar(it, size = 36, avatarDataUrl = avatars[it.name], modifier = Modifier.align(Alignment.BottomEnd).clip(CircleShape).border(2.dp, MaterialTheme.colorScheme.background, CircleShape)) }
+                    members.getOrNull(0)?.let { ProfileAvatar(it, size = 36, avatarDataUrl = avatars[it.name], modifier = Modifier.align(Alignment.TopStart).clip(CircleShape).border(2.dp, MaterialTheme.colorScheme.background, CircleShape)) }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(room.name.ifBlank { members.joinToString(", ") { it.label } }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Spacer(Modifier.height(2.dp))
+                val line = preview?.let { p -> listOf(p.sender, p.line).filter { it.isNotBlank() }.joinToString(": ") } ?: members.joinToString(", ") { it.label }
+                Text(line, style = MaterialTheme.typography.bodySmall, color = if (unread > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+            if (unread > 0) Box(Modifier.align(Alignment.TopEnd).padding(10.dp).size(10.dp).background(NeedsYou, CircleShape))
+        }
+    }
+}
+
+/**
+ * "Needs you": a shortcut, sections never move. One bot = a wide row with Open ›; two or more = a scrolling row
+ * of avatars, needs-OK first. Tapping one opens that bot's chat.
+ */
+@Composable
+private fun NeedsYouStrip(bots: List<RoutedBot>, statuses: Map<String, BotHome.Status>, avatars: Map<String, String>, onOpen: (RoutedBot) -> Unit) {
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    val fill = if (dark) NeedsYou.copy(alpha = 0.16f) else NeedsYou.copy(alpha = 0.08f)
+    val shape = RoundedCornerShape(18.dp)
+    Surface(shape = shape, color = fill, border = BorderStroke(1.dp, NeedsYou.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+        if (bots.size == 1) {
+            val bot = bots.single()
+            val status = statuses[bot.routeKey]
+            val needsOk = status?.kind == BotHome.Kind.NEEDS_OK
+            Row(Modifier.fillMaxWidth().clickable { onOpen(bot) }.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                StripAvatar(bot, avatars[bot.profile.name], 44, needsOk)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(stringResource(if (needsOk) R.string.botapp_strip_needs_ok else R.string.botapp_strip_unread, bot.label),
+                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val line = status?.text.orEmpty()
+                    if (line.isNotBlank()) Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.botapp_open) + " ›", style = MaterialTheme.typography.labelLarge, color = NeedsYou, fontWeight = FontWeight.SemiBold)
+            }
+        } else {
+            Column(Modifier.padding(top = 10.dp, bottom = 10.dp)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.botapp_needs_you).uppercase(), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                        color = NeedsYou, fontWeight = FontWeight.Bold, letterSpacing = TextUnit(1.1f, TextUnitType.Sp))
+                    Text(stringResource(R.string.botapp_needs_you_count, bots.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(8.dp))
+                androidx.compose.foundation.lazy.LazyRow(
+                    contentPadding = PaddingValues(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(bots, key = { "ny:" + it.routeKey }) { bot ->
+                        val needsOk = statuses[bot.routeKey]?.kind == BotHome.Kind.NEEDS_OK
+                        Column(Modifier.width(66.dp).clip(RoundedCornerShape(12.dp)).clickable { onOpen(bot) }.padding(vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally) {
+                            StripAvatar(bot, avatars[bot.profile.name], 50, needsOk)
+                            Spacer(Modifier.height(4.dp))
+                            Text(bot.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(stringResource(if (needsOk) R.string.botapp_needs_ok_short else R.string.botapp_unread_short), style = MaterialTheme.typography.labelSmall,
+                                color = if (needsOk) NeedsYou else MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = if (needsOk) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Strip avatar: orange shield bottom-right = needs your OK; orange dot top-right = unread. */
+@Composable
+private fun StripAvatar(bot: RoutedBot, avatar: String?, size: Int, needsOk: Boolean) {
+    Box {
+        ProfileAvatar(bot.profile, size = size, avatarDataUrl = avatar, modifier = Modifier.clip(CircleShape))
+        if (needsOk) Surface(shape = CircleShape, color = NeedsYou, border = BorderStroke(2.dp, MaterialTheme.colorScheme.background),
+            modifier = Modifier.align(Alignment.BottomEnd).size(18.dp)) {
+            Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Shield, null, Modifier.size(10.dp), tint = androidx.compose.ui.graphics.Color.White) }
+        } else Box(Modifier.align(Alignment.TopEnd).size(13.dp).border(2.dp, MaterialTheme.colorScheme.background, CircleShape).padding(2.dp).background(NeedsYou, CircleShape))
     }
 }
 

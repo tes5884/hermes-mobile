@@ -57,6 +57,23 @@ object BotHome {
         }
     }
 
+    /**
+     * The "Needs you" strip (Nova v2, Tzvi 2026-11-16): every visible bot on this server waiting on an approval or
+     * question, then every unread one, each newest first. The pinned bot is included; channels are not.
+     */
+    fun needsYou(bots: List<RoutedBot>, statuses: Map<String, Status>): List<RoutedBot> {
+        val live = bots.filter { it.activeConnection && !it.profile.botHidden }
+        fun of(kind: Kind) = live.filter { statuses[it.routeKey]?.kind == kind }
+            .sortedWith(compareByDescending<RoutedBot> { it.profile.activityAt }.thenBy { it.label.lowercase() })
+        return of(Kind.NEEDS_OK) + of(Kind.WAITING)
+    }
+
+    /** List or tiles, remembered on the phone (key `bots_home_view`); anything unknown is the list. */
+    enum class View { LIST, TILES }
+    const val VIEW_PREF = "bots_home_view"
+    fun view(saved: String?): View = if (saved == "tiles") View.TILES else View.LIST
+    fun viewValue(view: View): String = if (view == View.TILES) "tiles" else "list"
+
     data class Summary(val needYou: Int, val working: Int, val idle: Int)
 
     fun summary(statuses: Collection<Status>): Summary = Summary(

@@ -92,4 +92,13 @@
     <string name="botapp_edit_bot">Editar bot</string>
     <string name="botapp_more">Más</string>
     <string name="botapp_back">Atrás</string>
+    <string name="botapp_view_list">Ver como lista</string>
+    <string name="botapp_view_tiles">Ver como mosaico</string>
+    <string name="botapp_needs_you">Te necesitan</string>
+    <string name="botapp_needs_you_count">%d bots · toca para abrir</string>
+    <string name="botapp_strip_needs_ok">%s necesita tu OK</string>
+    <string name="botapp_strip_unread">%s te envió un mensaje</string>
+    <string name="botapp_open">Abrir</string>
+    <string name="botapp_needs_ok_short">Necesita OK</string>
+    <string name="botapp_unread_short">Sin leer</string>
 </resources>
