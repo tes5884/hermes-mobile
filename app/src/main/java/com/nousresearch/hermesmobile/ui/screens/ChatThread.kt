@@ -872,9 +872,15 @@ private fun QueueLane(
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        // Never re-sent by itself: it may already be waiting on the gateway (t_cde1eeab).
-                        if (item.hold == QueuedPrompt.HOLD_UNCONFIRMED) Text(
-                            stringResource(R.string.queue_item_unconfirmed),
+                        // Never re-sent by itself, and what is queued after it waits (t_cde1eeab, Shomer t_8d113995).
+                        val heldLabel = when (item.hold) {
+                            QueuedPrompt.HOLD_UNCONFIRMED -> R.string.queue_item_unconfirmed
+                            QueuedPrompt.HOLD_NOT_SENT -> R.string.queue_item_not_sent
+                            QueuedPrompt.HOLD_EDIT -> R.string.queue_item_edit_not_applied
+                            else -> null
+                        }
+                        if (heldLabel != null) Text(
+                            stringResource(heldLabel),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error
                         )

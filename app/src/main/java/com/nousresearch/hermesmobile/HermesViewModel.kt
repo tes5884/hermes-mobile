@@ -229,6 +229,18 @@ internal fun settleOverlays(state: HermesUiState): HermesUiState {
 class HermesViewModel(application: Application) : AndroidViewModel(application), HermesGatewayListener {
     private val store = GatewayConfigStore(application)
     private val composerStore = ChatComposerStore(application)
+    /** Keeps a refused send in its own chat, on screen or saved (Shomer t_8d113995). */
+    private val composerKeeper = com.nousresearch.hermesmobile.data.ComposerKeeper(composerStore)
+    private val composerScreen = object : com.nousresearch.hermesmobile.data.ComposerKeeper.Screen {
+        override val sessionId: String? get() = uiState.activeChat?.takeUnless { it.readOnly }?.storedSessionId
+        override val key: String? get() = uiState.activeChat?.takeUnless { it.readOnly }?.let(::composerKey)
+        override var state: ChatComposerStore.State
+            get() = ChatComposerStore.State(uiState.chatDraft, uiState.composerAttachments, uiState.queuedPrompts)
+            set(value) {
+                uiState = uiState.copy(chatDraft = value.draft, composerAttachments = value.attachments, queuedPrompts = value.queue)
+            }
+        override fun persist() = persistComposerSoon(immediate = true)
+    }
     private var repository: HermesRepository? = null
     private var readyWaiter: CompletableDeferred<Unit>? = null
 
@@ -1761,20 +1773,29 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     }
 
     fun removeQueuedPrompt(id: String) {
+        val fence = uiState.queuedPrompts.any { it.id == id && com.nousresearch.hermesmobile.data.OwnerRefusal.fences(it) }
         uiState = uiState.copy(queuedPrompts = uiState.queuedPrompts.filterNot { it.id == id })
         persistComposerSoon(immediate = true)
+        // What waited behind a held message goes on once you remove it (Shomer t_8d113995).
+        if (fence) drainIdleChatSoon()
     }
 
     fun updateQueuedPrompt(id: String, text: String) {
-        // Saving an edit of one that may already be queued on the gateway is the choice to send it again (t_cde1eeab).
-        val released = uiState.queuedPrompts.any { it.id == id && it.hold == QueuedPrompt.HOLD_UNCONFIRMED }
+        // Saving an edit of a held message (may already be queued on the gateway, refused, an edit not applied) is the
+        // choice to send it again (t_cde1eeab, Shomer t_8d113995); it goes first, then what waited behind it.
+        val released = uiState.queuedPrompts.any { it.id == id && com.nousresearch.hermesmobile.data.OwnerRefusal.fences(it) }
         uiState = uiState.copy(
             queuedPrompts = uiState.queuedPrompts.map {
                 if (it.id == id) it.copy(text = text, hold = if (released) null else it.hold) else it
             }
         )
         persistComposerSoon(immediate = true)
-        if (released) uiState.activeChat?.takeIf { !it.running }?.let { drainQueuedPromptSoon(it.runtimeSessionId) }
+        if (released) drainIdleChatSoon()
+    }
+
+    /** The chat on screen is idle and its queue may go on: drain it. */
+    private fun drainIdleChatSoon() {
+        uiState.activeChat?.takeIf { !it.running }?.let { drainQueuedPromptSoon(it.runtimeSessionId) }
     }
 
     fun moveQueuedPrompt(id: String, delta: Int) {
@@ -1787,6 +1808,8 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         rows.add(to, item)
         uiState = uiState.copy(queuedPrompts = rows)
         persistComposerSoon(immediate = true)
+        // You moved something ahead of a held message: that may go now.
+        if (rows.any(com.nousresearch.hermesmobile.data.OwnerRefusal::fences)) drainIdleChatSoon()
     }
 
     fun clearQueuedPrompts() {
@@ -1954,17 +1977,22 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
     private fun loadChatEnhancements(chat: ActiveChat, draft: String = "") {
         val key = composerKey(chat)
         val runtime = chat.runtimeSessionId
+        // Until it has loaded, what is on screen is not this chat's composer: a refusal is kept in its saved one.
+        composerKeeper.beginLoad()
         viewModelScope.launch {
-            val saved = withContext(Dispatchers.IO) { composerStore.load(key) }
-            if (uiState.activeChat?.runtimeSessionId != runtime) return@launch
-            uiState = uiState.copy(
-                chatDraft = draft.ifBlank { saved.draft },
-                composerAttachments = saved.attachments,
-                queuedPrompts = saved.queue,
-                reasoningText = "",
-                liveStatuses = emptyList(),
-                artifactSuggestions = emptyList()
-            )
+            // With the keeper's lock: a refusal lands in the saved composer before this reads it, or on screen after.
+            val saved = composerKeeper.load(key, chat.storedSessionId) { saved ->
+                if (uiState.activeChat?.runtimeSessionId != runtime) return@load false
+                uiState = uiState.copy(
+                    chatDraft = draft.ifBlank { saved.draft },
+                    composerAttachments = saved.attachments,
+                    queuedPrompts = saved.queue,
+                    reasoningText = "",
+                    liveStatuses = emptyList(),
+                    artifactSuggestions = emptyList()
+                )
+                true
+            } ?: return@launch
             if (draft.isNotBlank()) persistComposerSoon()
             refreshSessionMeta()
             // Its turn ended while the chat was closed: what was queued for it goes out now.
@@ -3708,7 +3736,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         // Claimed before sending: a short turn can end, and its notice arrive, before prompt.submit answers.
         // Its answer may then notify even with "only my prompts" on.
         com.nousresearch.hermesmobile.push.PushDelivery.claimTurn(getApplication(), chat.storedSessionId)
+        // Where a refusal is kept: the chat it was written in, on the connection it was sent on (Shomer t_8d113995).
+        val composer = composerKey(chat)
         viewModelScope.launch {
+            var submitted = false
             runCatching {
                 sessionModelPins[chat.runtimeSessionId]?.takeIf { it.ensureOnNextPrompt }?.let { pin ->
                     val reapplied = repo.switchSessionModel(
@@ -3737,6 +3768,7 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                     }))
                 }
                 retryWhileSessionBusy(enabled = fromQueue) {
+                    submitted = true
                     repo.submitPrompt(chat.runtimeSessionId, chat.profile, wire, rewind, confirmDeep, queued = fromQueue,
                         voiceTurn = voiceTurn, interrupted = interrupted)
                 }
@@ -3772,19 +3804,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                 // A call waiting for this turn's reply goes back to listening (the failure shows in the chat).
                 if (voiceTurn) voiceEngine?.loop?.onTurnEnded()
                 val current = uiState.activeChat
-                if (current?.runtimeSessionId == chat.runtimeSessionId) {
-                    val canRestore = uiState.chatDraft.isBlank() && uiState.composerAttachments.isEmpty()
-                    // Never lost (t_cde1eeab): a send refused while the gateway's turn runs waits in the queue and goes
-                    // again by itself; one that may already be queued there is kept but never re-sent by itself.
-                    val reason = com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)
-                    val outcome = com.nousresearch.hermesmobile.data.OwnerRefusal.outcome(reason, canRestore, rewind != null)
-                    val held = when (outcome) {
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.RETRY_QUEUE -> QueuedPrompt.HOLD_BUSY
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.HOLD_QUEUE -> QueuedPrompt.HOLD_UNCONFIRMED
-                        else -> null
-                    }
-                    val toQueue = outcome == com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.QUEUE || held != null
-                    val toDraft = outcome == com.nousresearch.hermesmobile.data.OwnerRefusal.Outcome.DRAFT
+                // Never lost (t_cde1eeab, Shomer t_8d113995): whatever the refusal, and whether or not its chat is still
+                // open, the message (or edit) is kept in the chat it was written in. Busy goes again by itself; anything
+                // else waits for you, and what was queued after it waits behind it.
+                val hold = com.nousresearch.hermesmobile.data.OwnerRefusal.holdFor(t, submitted)
+                val here = current?.runtimeSessionId == chat.runtimeSessionId
+                if (here && current != null) {
                     uiState = uiState.copy(
                         activeChat = current.copy(
                             // A failed edit puts the chat back as it was.
@@ -3794,27 +3819,21 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
                             },
                             running = false
                         ),
-                        chatDraft = if (toDraft) prompt else uiState.chatDraft,
-                        composerAttachments = if (toDraft) attachments else uiState.composerAttachments,
-                        queuedPrompts = if (toQueue) {
-                            listOf(QueuedPrompt(UUID.randomUUID().toString(), prompt, attachments, hold = held)) + uiState.queuedPrompts
-                        } else uiState.queuedPrompts,
                         liveStatuses = uiState.liveStatuses.filterNot { it.id == "attachments" },
                         // A held message is explained by the line over the composer, not an error.
-                        error = if (held == QueuedPrompt.HOLD_BUSY) uiState.error else t.message
+                        error = if (hold == QueuedPrompt.HOLD_BUSY) uiState.error else t.message
                     )
-                    persistComposerSoon(immediate = true)
-                    if (held == QueuedPrompt.HOLD_BUSY) retryHeldSoon(chat.runtimeSessionId)
-                } else if (rewind == null) {
-                    // The chat was left while it was refused: it waits in that chat's queue (sent when it opens again).
-                    val hold = when (com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)) {
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.BUSY -> QueuedPrompt.HOLD_BUSY
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.UNCONFIRMED -> QueuedPrompt.HOLD_UNCONFIRMED
-                        else -> null
-                    }
-                    if (hold != null) restoreQueue(chat, listOf(QueuedPrompt(UUID.randomUUID().toString(), prompt, attachments, hold = hold)))
-                    val reopened = uiState.activeChat?.takeIf { it.storedSessionId == chat.storedSessionId }
-                    if (hold == QueuedPrompt.HOLD_BUSY && reopened != null) retryHeldSoon(reopened.runtimeSessionId)
+                } else if (hold != QueuedPrompt.HOLD_BUSY) {
+                    uiState = uiState.copy(snackbar = chat.title.takeIf { it.isNotBlank() }
+                        ?.let { string(R.string.queue_kept_in_chat, it) } ?: string(R.string.queue_kept_in_chat_generic))
+                }
+                keepRefused(composer, chat.storedSessionId) {
+                    com.nousresearch.hermesmobile.data.OwnerRefusal.keep(
+                        it, UUID.randomUUID().toString(), prompt, attachments, hold, edit = rewind != null
+                    )
+                }
+                if (hold == QueuedPrompt.HOLD_BUSY) {
+                    uiState.activeChat?.takeIf { it.storedSessionId == chat.storedSessionId }?.let { retryHeldSoon(it.runtimeSessionId) }
                 }
             }
         }
@@ -3857,14 +3876,15 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
      */
     private fun handOffQueue(): Job? {
         val chat = uiState.activeChat?.takeUnless { it.readOnly } ?: return null
-        // One that may already be queued on the gateway is never sent by itself: it stays with the chat.
-        val prompts = uiState.queuedPrompts.filter { it.hold != QueuedPrompt.HOLD_UNCONFIRMED }
-        val kept = uiState.queuedPrompts.filter { it.hold == QueuedPrompt.HOLD_UNCONFIRMED }
+        // Never past a message that may already be queued on the gateway or that failed (Shomer t_8d113995): it, and
+        // everything queued after it, stays with the chat in order until you resolve it.
+        val (prompts, kept) = com.nousresearch.hermesmobile.data.OwnerRefusal.handOffPlan(uiState.queuedPrompts)
         val repo = repository
         if (prompts.isEmpty() || repo == null) return null
         // Out of the queue before sending: reopening the chat meanwhile must not drain them a second time.
         uiState = uiState.copy(queuedPrompts = kept)
         persistCurrentComposerNow()
+        val composer = composerKey(chat)
         val app = getApplication<Application>()
         val previous = queueHandoffJob
         return viewModelScope.launch {
@@ -3872,29 +3892,22 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
             previous?.join()
             prompts.forEachIndexed { index, item ->
                 com.nousresearch.hermesmobile.push.PushDelivery.claimTurn(app, chat.storedSessionId)
+                var submitted = false
                 val sent = runCatching {
                     val (wire, _) = uploadPrompt(repo, chat, item.text, item.attachments)
                     retryWhileSessionBusy(enabled = true) {
+                        submitted = true
                         repo.submitPrompt(chat.runtimeSessionId, chat.profile, wire, queued = true)
                     }
                 }
                 sent.exceptionOrNull()?.let { t ->
                     com.nousresearch.hermesmobile.push.PushDelivery.releaseTurn(app, chat.storedSessionId)
                     if (t is CancellationException) throw t
-                    // Refused while the gateway's turn runs: kept, marked, and sent when the chat is open again.
-                    val rest = prompts.drop(index)
-                    when (com.nousresearch.hermesmobile.data.OwnerRefusal.reason(t)) {
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.BUSY ->
-                            restoreQueue(chat, listOf(rest.first().copy(hold = QueuedPrompt.HOLD_BUSY)) + rest.drop(1))
-                        com.nousresearch.hermesmobile.data.OwnerRefusal.UNCONFIRMED -> {
-                            restoreQueue(chat, listOf(rest.first().copy(hold = QueuedPrompt.HOLD_UNCONFIRMED)) + rest.drop(1))
-                            uiState = uiState.copy(error = t.message)
-                        }
-                        else -> {
-                            restoreQueue(chat, rest)
-                            uiState = uiState.copy(error = t.message)
-                        }
-                    }
+                    // Refused: it and the rest go back to the head of that chat's queue, in order; busy is sent again by
+                    // itself when the chat is open, anything else waits for you (and fences what follows).
+                    val rest = com.nousresearch.hermesmobile.data.OwnerRefusal.afterHandOffFailure(prompts.drop(index), t, submitted)
+                    keepRefused(composer, chat.storedSessionId) { it.copy(queue = rest + it.queue) }
+                    if (rest.first().hold != QueuedPrompt.HOLD_BUSY) uiState = uiState.copy(error = t.message)
                     uiState.activeChat?.takeIf { it.storedSessionId == chat.storedSessionId }?.let { retryHeldSoon(it.runtimeSessionId) }
                     return@launch
                 }
@@ -3902,18 +3915,18 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         }.also { queueHandoffJob = it }
     }
 
-    /** What could not be handed off goes back to the head of its chat's queue, open or not. */
-    private suspend fun restoreQueue(chat: ActiveChat, prompts: List<QueuedPrompt>) {
-        if (uiState.activeChat?.storedSessionId == chat.storedSessionId) {
-            uiState = uiState.copy(queuedPrompts = prompts + uiState.queuedPrompts)
-            persistComposerSoon(immediate = true)
-            return
-        }
-        val key = composerKey(chat)
-        withContext(Dispatchers.IO) {
-            val saved = composerStore.load(key)
-            composerStore.save(key, saved.copy(queue = prompts + saved.queue))
-        }
+    /**
+     * Keeps a refused message (or a handoff's unsent rest) in the chat it belongs to, open or not (Shomer t_8d113995):
+     * on screen when that chat's composer is loaded there, else in its saved composer, which the chat loads when it
+     * opens ([com.nousresearch.hermesmobile.data.ComposerKeeper]).
+     */
+    private suspend fun keepRefused(
+        key: String,
+        storedSessionId: String,
+        transform: (ChatComposerStore.State) -> ChatComposerStore.State
+    ) {
+        // A save of that chat's composer still under way (it was just left) lands first, then this on top of it.
+        composerKeeper.keep(key, storedSessionId, composerScreen, beforeSave = { composerSaveJob?.join() }, transform = transform)
     }
 
     private fun readAttachmentBytes(item: ComposerAttachment): ByteArray {
@@ -3940,7 +3953,10 @@ class HermesViewModel(application: Application) : AndroidViewModel(application),
         if (readOnlyActiveChat()) return
         val current = uiState.activeChat ?: return
         if (current.runtimeSessionId != expectedRuntimeId || current.running) return
-        // Never one that may already be queued on the gateway (t_cde1eeab): that waits for you.
+        // Only this chat's own queue, once it has loaded (not one still on screen from the chat just left).
+        if (!composerKeeper.isLoaded(current.storedSessionId)) return
+        // Never past one that may already be queued on the gateway or that failed (t_cde1eeab, Shomer t_8d113995): it,
+        // and everything after it, waits for you.
         val next = com.nousresearch.hermesmobile.data.OwnerRefusal.nextToSend(uiState.queuedPrompts) ?: return
         uiState = uiState.copy(queuedPrompts = uiState.queuedPrompts.filterNot { it.id == next.id })
         persistComposerSoon(immediate = true)

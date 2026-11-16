@@ -3,6 +3,10 @@
     <string name="queue_waiting_for_ok_show">Ver</string>
     <string name="queue_held_for_turn">En cola, se envía cuando termine el turno de %1$s</string>
     <string name="queue_held_for_turn_generic">En cola, se envía cuando termine el turno actual</string>
-    <string name="queue_item_unconfirmed">Puede que ya esté en cola: revisa el chat. Edítalo para enviarlo otra vez.</string>
+    <string name="queue_item_unconfirmed">Puede que ya esté en cola: revisa el chat. Edítalo para enviarlo otra vez, o quítalo. Los mensajes siguientes esperan.</string>
+    <string name="queue_item_not_sent">No se envió. Edítalo para enviarlo otra vez, o quítalo. Los mensajes siguientes esperan.</string>
+    <string name="queue_item_edit_not_applied">Tu edición no se aplicó. Edítala para enviarla como mensaje nuevo, o quítala. Los mensajes siguientes esperan.</string>
+    <string name="queue_kept_in_chat">No se envió a %1$s. Se guarda en ese chat.</string>
+    <string name="queue_kept_in_chat_generic">Un mensaje no se envió. Se guarda en su chat.</string>
     <string name="gateway_approval_already">Esa aprobación ya se respondió o terminó.</string>
 </resources>

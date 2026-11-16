@@ -13,7 +13,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Encrypted per-conversation drafts and client-side send queue. */
-class ChatComposerStore(context: Context) {
+class ChatComposerStore(context: Context) : ComposerSaves {
     private val prefs = context.getSharedPreferences("hermes_mobile_chat", Context.MODE_PRIVATE)
     private val alias = "hermes_mobile_chat_key"
 
@@ -23,7 +23,7 @@ class ChatComposerStore(context: Context) {
         val queue: List<QueuedPrompt> = emptyList()
     )
 
-    fun load(key: String): State {
+    override fun load(key: String): State {
         val encoded = prefs.getString(key, null) ?: return State()
         return runCatching {
             val root = JSONObject(decrypt(encoded))
@@ -40,7 +40,7 @@ class ChatComposerStore(context: Context) {
                                     text = row.optString("text"),
                                     attachments = attachmentsFromJson(row.optJSONArray("attachments")),
                                     createdAt = row.optLong("created_at", 0L),
-                                    hold = row.optString("hold").takeIf { it == QueuedPrompt.HOLD_BUSY || it == QueuedPrompt.HOLD_UNCONFIRMED }
+                                    hold = row.optString("hold").takeIf { it in QueuedPrompt.HOLDS }
                                 )
                             )
                         }
@@ -50,7 +50,7 @@ class ChatComposerStore(context: Context) {
         }.getOrDefault(State())
     }
 
-    fun save(key: String, state: State) {
+    override fun save(key: String, state: State) {
         if (state.draft.isBlank() && state.attachments.isEmpty() && state.queue.isEmpty()) {
             prefs.edit().remove(key).apply()
             return

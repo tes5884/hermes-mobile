@@ -999,8 +999,13 @@ data class QueuedPrompt(
     companion object {
         /** Refused while the gateway's turn runs: sent again by itself until it goes through. */
         const val HOLD_BUSY = "busy"
-        /** May already be queued on the gateway: never sent again by itself. */
+        /** May already be queued on the gateway: never sent again by itself; what is queued after it waits. */
         const val HOLD_UNCONFIRMED = "unconfirmed"
+        /** The gateway refused it (or it never went out): never sent again by itself; what is queued after it waits. */
+        const val HOLD_NOT_SENT = "not_sent"
+        /** An edit that was not applied: never sent again by itself; what is queued after it waits. */
+        const val HOLD_EDIT = "edit"
+        val HOLDS = setOf(HOLD_BUSY, HOLD_UNCONFIRMED, HOLD_NOT_SENT, HOLD_EDIT)
     }
 }
 

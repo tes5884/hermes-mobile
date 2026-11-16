@@ -4,6 +4,10 @@
     <string name="queue_waiting_for_ok_show">Show</string>
     <string name="queue_held_for_turn">Queued, sends when %1$s\'s turn ends</string>
     <string name="queue_held_for_turn_generic">Queued, sends when the current turn ends</string>
-    <string name="queue_item_unconfirmed">May already be queued: check the chat. Edit it to send it again.</string>
+    <string name="queue_item_unconfirmed">May already be queued: check the chat. Edit it to send it again, or remove it. Messages after it wait.</string>
+    <string name="queue_item_not_sent">Not sent. Edit it to send it again, or remove it. Messages after it wait.</string>
+    <string name="queue_item_edit_not_applied">Your edit was not applied. Edit it to send it as a new message, or remove it. Messages after it wait.</string>
+    <string name="queue_kept_in_chat">Not sent to %1$s. It is kept in that chat.</string>
+    <string name="queue_kept_in_chat_generic">A message was not sent. It is kept in its chat.</string>
     <string name="gateway_approval_already">That approval was already answered or has ended.</string>
 </resources>
