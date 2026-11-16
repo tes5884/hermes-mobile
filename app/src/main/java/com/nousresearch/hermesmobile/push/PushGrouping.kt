@@ -9,8 +9,13 @@ object PushGrouping {
     /** A file push this soon after a text push from the same bot joins that notification. */
     const val MERGE_WINDOW_MS = 10_000L
 
-    fun groupKey(profile: String) = "hermes_bot_$profile"
-    fun summaryTag(profile: String) = "summary:$profile"
+    /**
+     * One bot on one server: the identity of its notification group, summary and file-merge slot. Two servers can
+     * both have an "ezra"; keyed by profile alone their notices shared one group and the summary opened the wrong one.
+     */
+    fun conversationKey(connection: String, profile: String) = "$connection|$profile"
+    fun groupKey(connection: String, profile: String) = "hermes_bot_" + conversationKey(connection, profile)
+    fun summaryTag(connection: String, profile: String) = "summary:" + conversationKey(connection, profile)
 
     /** "Della · 2" */
     fun summaryText(profile: String, count: Int) = "${botName(profile)} · $count"

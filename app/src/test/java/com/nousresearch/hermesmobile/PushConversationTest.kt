@@ -43,6 +43,26 @@ class PushConversationTest {
         assertFalse(event.has("body"))
     }
 
+    @Test fun refusedOrFailedShortcutFallsBackToLargeIcon() {
+        // pushDynamicShortcut answered true: the notice is tied to the shortcut, no large icon on Android 11+.
+        val ok = PushConversation.published("bot:home|ezra") { true }
+        assertEquals("bot:home|ezra", ok)
+        assertFalse(PushConversation.needsLargeIcon(30, ok))
+        assertFalse(PushConversation.needsLargeIcon(36, ok))
+        // Answered false (refused, rate-limited): no shortcut id, the photo rides as the large icon even on 30+.
+        val refused = PushConversation.published("bot:home|ezra") { false }
+        assertNull(refused)
+        assertTrue(PushConversation.needsLargeIcon(30, refused))
+        assertTrue(PushConversation.needsLargeIcon(36, refused))
+        // Threw: same.
+        val threw = PushConversation.published("bot:home|ezra") { throw IllegalStateException("rate limited") }
+        assertNull(threw)
+        assertTrue(PushConversation.needsLargeIcon(34, threw))
+        // Below Android 11 there are no conversation notices: always the large icon.
+        assertTrue(PushConversation.needsLargeIcon(29, ok))
+        assertTrue(PushConversation.needsLargeIcon(26, ok))
+    }
+
     @Test fun avatarFetchedOnlyWhenMissingOrRevisionMoved() {
         // Has a photo: fetch when nothing saved, the file is gone, or the hermes-bots revision changed.
         assertTrue(PushAvatars.stale(saved = null, current = 3, hasPhotoFile = false, hasAvatar = true))

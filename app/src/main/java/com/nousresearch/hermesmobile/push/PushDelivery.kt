@@ -188,9 +188,9 @@ object PushDelivery {
         val shortcut = bot?.let { PushPeople.publish(context, connection, profile, it) }
         if (profile.isNotBlank()) {
             // One Android group per bot (not one "Hermes" stack).
-            builder.setGroup(PushGrouping.groupKey(profile)).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            builder.setGroup(PushGrouping.groupKey(connection, profile)).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
             // Below Android 11, or when the shortcut could not be published, the photo rides as the large icon.
-            if (!PushPeople.conversationsSupported || shortcut == null) {
+            if (PushConversation.needsLargeIcon(android.os.Build.VERSION.SDK_INT, shortcut)) {
                 builder.setLargeIcon(if (connection.isNotBlank()) PushPeople.icon(context, connection, profile, 128)
                     else PushGrouping.roundAvatar(null, profile))
             }
@@ -227,9 +227,12 @@ object PushDelivery {
     class MergedFile(val eventId: String, val name: String)
 
     private const val LAST_TEXT = "last_text"
+    /** The text-merge slot of one bot on one server (two servers' "ezra" never merge into each other). */
+    private fun lastTextKey(event: JSONObject) =
+        LAST_TEXT + ":" + PushGrouping.conversationKey(event.optString("connection"), event.optString("profile"))
     private fun rememberText(context: Context, event: JSONObject) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(LAST_TEXT + ":" + event.optString("profile"), JSONObject().put("at", System.currentTimeMillis()).put("event", event).toString()).apply()
+            .putString(lastTextKey(event), JSONObject().put("at", System.currentTimeMillis()).put("event", event).toString()).apply()
     }
 
     /**
@@ -237,18 +240,19 @@ object PushDelivery {
      * an action button. Returns true when merged, so the file gets no row of its own.
      */
     private fun mergeIntoText(context: Context, nm: NotificationManager, event: JSONObject, files: List<String>): Boolean {
-        val profile = event.optString("profile")
-        val saved = runCatching { JSONObject(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(LAST_TEXT + ":" + profile, null) ?: return false) }.getOrNull() ?: return false
+        val saved = runCatching { JSONObject(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(lastTextKey(event), null) ?: return false) }.getOrNull() ?: return false
         val text = saved.optJSONObject("event") ?: return false
         val textId = text.optString("event_id")
-        if (!PushGrouping.shouldMerge(profile, saved.optLong("at"), profile, System.currentTimeMillis())) return false
+        val fileBot = PushGrouping.conversationKey(event.optString("connection"), event.optString("profile"))
+        val textBot = PushGrouping.conversationKey(text.optString("connection"), text.optString("profile"))
+        if (event.optString("profile").isBlank() || !PushGrouping.shouldMerge(textBot, saved.optLong("at"), fileBot, System.currentTimeMillis())) return false
         if (nm.activeNotifications.none { it.tag == textId }) return false
         return show(context, textId, text, MergedFile(event.optString("event_id"), PushMedia.name(files.first())))
     }
 
     private fun postSummary(context: Context, nm: NotificationManager, profile: String, connection: String, accent: Int) {
-        val key = PushGrouping.groupKey(profile)
-        val count = nm.activeNotifications.count { it.notification.group == key && it.tag != PushGrouping.summaryTag(profile) }
+        val key = PushGrouping.groupKey(connection, profile)
+        val count = nm.activeNotifications.count { it.notification.group == key && it.tag != PushGrouping.summaryTag(connection, profile) }
         if (count < 1) return
         // Opens that bot's chat (MainActivity routes ACTION_OPEN_BOT); before vc87 the action named no screen.
         val open = Intent(context, MainActivity::class.java).setAction(PushConversation.ACTION_OPEN_BOT)
@@ -261,7 +265,7 @@ object PushDelivery {
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
             .setContentIntent(PendingIntent.getActivity(context, 2, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
-        nm.notify(PushGrouping.summaryTag(profile), 0, summary)
+        nm.notify(PushGrouping.summaryTag(connection, profile), 0, summary)
     }
     /** Removes a notice from the shade and the inbox: the server withdrew it. */
     fun withdraw(context: Context, eventId: String) {

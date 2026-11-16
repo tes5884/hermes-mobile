@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Typeface
-import android.os.Build
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.StyleSpan
@@ -52,6 +51,18 @@ object PushConversation {
     /** What a shortcut tap hands to the view model: the same shape as a cron notice without a chat (opens Bot Chat). */
     fun openEvent(connection: String, profile: String): JSONObject =
         JSONObject().put("connection", connection).put("profile", profile)
+
+    /**
+     * The shortcut id to tie the notice to, or null when publishing it failed: `pushDynamicShortcut` answering
+     * false (refused, e.g. rate-limited) counts as a failure, exactly like it throwing.
+     */
+    fun published(id: String, push: () -> Boolean): String? = runCatching { id.takeIf { push() } }.getOrNull()
+
+    /**
+     * The photo must ride as the large icon when Android won't draw it from a conversation shortcut: below
+     * Android 11 (API 30), or when the shortcut wasn't published.
+     */
+    fun needsLargeIcon(sdkInt: Int, shortcutId: String?): Boolean = sdkInt < 30 || shortcutId == null
 }
 
 /**
@@ -137,20 +148,21 @@ object PushPeople {
      * with the bot's photo large and the app's badge in the corner. Returns the shortcut id, or null on failure
      * (the notice then falls back to a large icon).
      */
-    fun publish(context: Context, connection: String, profile: String, person: Person): String? = runCatching {
+    fun publish(context: Context, connection: String, profile: String, person: Person): String? {
         val id = PushConversation.shortcutId(connection, profile)
-        val open = Intent(context, MainActivity::class.java).setAction(PushConversation.ACTION_OPEN_BOT)
-            .putExtra(PushConversation.EXTRA_CONNECTION, connection).putExtra(PushConversation.EXTRA_PROFILE, profile)
-        val shortcut = ShortcutInfoCompat.Builder(context, id)
-            .setShortLabel(person.name ?: PushGrouping.botName(profile))
-            .setLongLived(true)
-            .setPerson(person)
-            .setIcon(IconCompat.createWithBitmap(icon(context, connection, profile)))
-            .setIntent(open)
-            .build()
-        ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
-        id
-    }.getOrNull()
+        return PushConversation.published(id) {
+            val open = Intent(context, MainActivity::class.java).setAction(PushConversation.ACTION_OPEN_BOT)
+                .putExtra(PushConversation.EXTRA_CONNECTION, connection).putExtra(PushConversation.EXTRA_PROFILE, profile)
+            val shortcut = ShortcutInfoCompat.Builder(context, id)
+                .setShortLabel(person.name ?: PushGrouping.botName(profile))
+                .setLongLived(true)
+                .setPerson(person)
+                .setIcon(IconCompat.createWithBitmap(icon(context, connection, profile)))
+                .setIntent(open)
+                .build()
+            ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
+        }
+    }
 
     /** Text with an optional bold heading line ("Morning briefing", "Front Office", "Approval needed"). */
     fun text(heading: String?, body: String): CharSequence {
@@ -160,7 +172,4 @@ object PushPeople {
         if (body.isNotBlank()) out.append('\n').append(body)
         return out
     }
-
-    /** Below Android 11 there are no conversation notices: the photo goes in as the large icon instead. */
-    val conversationsSupported: Boolean get() = Build.VERSION.SDK_INT >= 30
 }
